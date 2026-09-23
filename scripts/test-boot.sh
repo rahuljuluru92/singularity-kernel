@@ -14,7 +14,7 @@ if [ "${#MARKERS[@]}" -eq 0 ]; then
     MARKERS=("[OK] boot")
 fi
 
-BOOT_SECONDS=15 # stage 5's scheduler demos do real (if brief) busy-wait work
+BOOT_SECONDS=20 # stage 5's scheduler demos + stage 6's 100-iteration disk-I/O torture test
 
 OVMF_DIR="$(brew --prefix qemu)/share/qemu"
 OVMF_CODE="$OVMF_DIR/edk2-x86_64-code.fd"
@@ -26,6 +26,9 @@ mkdir -p build
 if [ ! -f "$VARS" ]; then
     cp "$VARS_TEMPLATE" "$VARS"
 fi
+if [ ! -f build/disk.img ]; then
+    ./scripts/make-disk.sh
+fi
 rm -f "$LOG"
 
 qemu-system-x86_64 \
@@ -34,6 +37,8 @@ qemu-system-x86_64 \
     -drive if=pflash,format=raw,unit=0,file="$OVMF_CODE",readonly=on \
     -drive if=pflash,format=raw,unit=1,file="$VARS" \
     -drive format=raw,file=fat:rw:build/esp \
+    -drive file=build/disk.img,format=raw,if=none,id=disk0 \
+    -device virtio-blk-pci,drive=disk0 \
     -serial file:"$LOG" \
     -display none \
     -no-reboot &

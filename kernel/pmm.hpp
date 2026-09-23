@@ -20,6 +20,12 @@ void init(efi::Handle image_handle, efi::SystemTable* system_table);
 std::uintptr_t alloc_page();
 void free_page(std::uintptr_t physical_address);
 
+// Returns the physical address of the first of `count` physically
+// contiguous pages, or 0 on failure. For hardware (like a virtqueue)
+// that's handed one base address and assumes everything after it is
+// contiguous.
+std::uintptr_t alloc_contiguous_pages(std::size_t count);
+
 std::size_t total_pages();
 std::size_t free_pages();
 

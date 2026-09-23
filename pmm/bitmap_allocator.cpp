@@ -74,4 +74,26 @@ std::size_t BitmapAllocator::alloc() {
 
 void BitmapAllocator::free(std::size_t page_index) { mark_free(page_index); }
 
+std::size_t BitmapAllocator::alloc_contiguous(std::size_t count) {
+    if (count == 0 || count > free_count_) {
+        return kInvalidPage;
+    }
+    for (std::size_t start = 0; start + count <= page_count_; start++) {
+        bool all_free = true;
+        for (std::size_t i = 0; i < count; i++) {
+            if (!is_free(start + i)) {
+                all_free = false;
+                break;
+            }
+        }
+        if (all_free) {
+            for (std::size_t i = 0; i < count; i++) {
+                mark_used(start + i);
+            }
+            return start;
+        }
+    }
+    return kInvalidPage;
+}
+
 } // namespace pmm

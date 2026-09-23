@@ -1,4 +1,5 @@
 #include "efi.hpp"
+#include "fat32.hpp"
 #include "gdt.hpp"
 #include "heap.hpp"
 #include "idt.hpp"
@@ -9,6 +10,7 @@
 #include "pmm.hpp"
 #include "sched.hpp"
 #include "serial.hpp"
+#include "virtio_blk.hpp"
 
 namespace {
 
@@ -225,6 +227,60 @@ void scheduler_torture_test() {
     serial::puts("[OK] scheduler torture\r\n");
 }
 
+constexpr const char* kTestFileName = "HELLO.TXT";
+constexpr const char* kExpectedContent = "Hello from the Singularity Kernel test disk!";
+
+constexpr std::size_t const_strlen(const char* s) {
+    std::size_t n = 0;
+    while (s[n] != '\0') {
+        n++;
+    }
+    return n;
+}
+
+void disk_io_test() {
+    char buf[128] = {};
+    int n = fat32::read_file(kTestFileName, buf, sizeof(buf) - 1);
+    if (n < 0) {
+        panic("disk I/O: test file not found");
+    }
+    if (static_cast<std::size_t>(n) != const_strlen(kExpectedContent)) {
+        panic("disk I/O: file size mismatch");
+    }
+    for (int i = 0; i < n; i++) {
+        if (buf[i] != kExpectedContent[i]) {
+            panic("disk I/O: file content mismatch");
+        }
+    }
+    buf[n] = '\0';
+    serial::puts("[OK] disk read: ");
+    serial::puts(buf);
+    serial::puts("\r\n");
+}
+
+// Repeatedly reads the same file end-to-end (virtio-blk request/poll
+// cycle, FAT cluster-chain walk, byte copy) and verifies byte-for-byte
+// correctness every time — proof the driver and filesystem reader are
+// stable under repeated use, not just correct once.
+void disk_io_torture_test() {
+    constexpr int kIterations = 100;
+    std::size_t expected_len = const_strlen(kExpectedContent);
+
+    for (int iter = 0; iter < kIterations; iter++) {
+        char buf[128] = {};
+        int n = fat32::read_file(kTestFileName, buf, sizeof(buf) - 1);
+        if (n < 0 || static_cast<std::size_t>(n) != expected_len) {
+            panic("disk I/O torture: size mismatch on a repeated read");
+        }
+        for (int i = 0; i < n; i++) {
+            if (buf[i] != kExpectedContent[i]) {
+                panic("disk I/O torture: content mismatch on a repeated read");
+            }
+        }
+    }
+    serial::puts("[OK] disk torture\r\n");
+}
+
 } // namespace
 
 extern "C" void kernel_main(efi::Handle image_handle, efi::SystemTable* system_table) {
@@ -281,6 +337,12 @@ extern "C" void kernel_main(efi::Handle image_handle, efi::SystemTable* system_t
 
     scheduler_interleaving_demo();
     scheduler_torture_test();
+
+    virtio_blk::init(); // prints [OK] virtio-blk queue_size=...
+    fat32::init();       // prints [OK] fat32 bytes_per_sector=...
+
+    disk_io_test();
+    disk_io_torture_test();
 
     for (;;) {
         asm volatile("hlt");

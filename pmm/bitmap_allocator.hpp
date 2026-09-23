@@ -33,6 +33,14 @@ class BitmapAllocator {
     // kInvalidPage if none are free.
     std::size_t alloc();
 
+    // Returns the index of the first page of `count` newly-allocated,
+    // physically contiguous pages, or kInvalidPage if no run that long
+    // is free. Needed by anything (like a virtqueue) that hands a device
+    // a single base physical address and relies on everything after it
+    // being contiguous — plain alloc() gives no such guarantee between
+    // separate calls.
+    std::size_t alloc_contiguous(std::size_t count);
+
     // Idempotent, like mark_free — freeing an already-free (or
     // already-double-freed) page is a no-op, not an error. See
     // DECISIONS.md for why: no panic/error-reporting path exists at this
