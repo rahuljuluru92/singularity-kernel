@@ -29,6 +29,21 @@ inline uint64_t to_physical(uint64_t virt) {
     return virt;
 }
 
+// Registers one additional physical page that init() should map
+// read+write+execute — present, writable, AND executable, all three at
+// once — instead of the usual read+write/NX default. This is a
+// deliberate, narrow W^X exception, unlike literally every other page
+// in this kernel (including the kernel's own .text, which is
+// read+execute but never writable). Must be called before init() —
+// permissions are decided once, per page, while init() builds the
+// tables; there's no re-walk afterward. Only ever needed for the fixed
+// low-memory AP trampoline page (kernel/smp.hpp) so far: the BSP must
+// write (copy + patch) it, and the AP itself must execute from that
+// exact same physical page in the instant right after it enables
+// paging, before it's reached any other executable memory. See
+// DECISIONS.md, stage 9.
+void add_executable_page(uint64_t phys);
+
 // Builds a fresh set of page tables: a direct map of all physical memory
 // pmm tracks, at both its original low (identity) address and a
 // higher-half offset, with W^X enforced per page (the kernel's own .text
@@ -49,5 +64,13 @@ void init();
 // non-.text page. Must run after init() — reuses its page tables. phys
 // is truncated down to its containing page if not already page-aligned.
 void map_mmio(uint64_t phys);
+
+// The physical address of the root (PML4) table init() built and
+// switched CR3 to. Valid only after init(). Every core shares this exact
+// same table — the AP trampoline loads it into its own CR3 verbatim
+// (see kernel/smp.cpp) rather than building a second, redundant set of
+// tables, since the BSP's already cover all of physical memory this
+// kernel tracks.
+uint64_t root_table_physical();
 
 } // namespace paging

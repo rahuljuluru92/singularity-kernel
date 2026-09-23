@@ -39,10 +39,12 @@ CXX_OBJS := $(BUILD)/boot.o \
             $(BUILD)/madt_parser.o \
             $(BUILD)/acpi.o \
             $(BUILD)/lapic.o \
-            $(BUILD)/ioapic.o
+            $(BUILD)/ioapic.o \
+            $(BUILD)/smp.o
 
 ASM_OBJS := $(BUILD)/gdt_flush.o \
-            $(BUILD)/isr_stubs.o
+            $(BUILD)/isr_stubs.o \
+            $(BUILD)/ap_trampoline_blob.o
 
 OBJS := $(CXX_OBJS) $(ASM_OBJS)
 
@@ -54,7 +56,7 @@ $(BUILD)/boot.o: boot/boot.cpp include/serial.hpp kernel/efi.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD)/main.o: kernel/main.cpp kernel/acpi.hpp kernel/lapic.hpp kernel/ioapic.hpp kernel/gdt.hpp kernel/idt.hpp kernel/isr.hpp kernel/pmm.hpp kernel/paging.hpp kernel/heap.hpp kernel/pic.hpp kernel/pit.hpp kernel/sched.hpp kernel/virtio_blk.hpp kernel/fat32.hpp kernel/shell.hpp include/serial.hpp
+$(BUILD)/main.o: kernel/main.cpp kernel/acpi.hpp kernel/lapic.hpp kernel/ioapic.hpp kernel/smp.hpp kernel/gdt.hpp kernel/idt.hpp kernel/isr.hpp kernel/pmm.hpp kernel/paging.hpp kernel/heap.hpp kernel/pic.hpp kernel/pit.hpp kernel/sched.hpp kernel/virtio_blk.hpp kernel/fat32.hpp kernel/shell.hpp include/serial.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
@@ -114,6 +116,10 @@ $(BUILD)/ioapic.o: kernel/ioapic.cpp kernel/ioapic.hpp kernel/acpi.hpp kernel/pa
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
+$(BUILD)/smp.o: kernel/smp.cpp kernel/smp.hpp kernel/acpi.hpp pmm/bitmap_allocator.hpp kernel/gdt.hpp kernel/heap.hpp kernel/idt.hpp kernel/lapic.hpp kernel/paging.hpp kernel/pmm.hpp include/serial.hpp
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
 $(BUILD)/pmm.o: kernel/pmm.cpp kernel/pmm.hpp kernel/efi.hpp pmm/bitmap_allocator.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
@@ -143,6 +149,19 @@ $(BUILD)/gdt_flush.o: kernel/gdt_flush.asm
 	$(NASM) $(NASMFLAGS) $< -o $@
 
 $(BUILD)/isr_stubs.o: kernel/isr_stubs.asm
+	@mkdir -p $(BUILD)
+	$(NASM) $(NASMFLAGS) $< -o $@
+
+# The AP trampoline is assembled as a flat binary (its own `org`, no ELF
+# wrapper) since it must run as raw machine code copied verbatim to a
+# fixed physical address — see kernel/ap_trampoline.asm.
+$(BUILD)/ap_trampoline.bin: kernel/ap_trampoline.asm
+	@mkdir -p $(BUILD)
+	$(NASM) -f bin $< -o $@
+
+# Embeds that flat binary into the normal ELF64 link via incbin — see
+# kernel/ap_trampoline_blob.asm. Must be assembled after the .bin exists.
+$(BUILD)/ap_trampoline_blob.o: kernel/ap_trampoline_blob.asm $(BUILD)/ap_trampoline.bin
 	@mkdir -p $(BUILD)
 	$(NASM) $(NASMFLAGS) $< -o $@
 

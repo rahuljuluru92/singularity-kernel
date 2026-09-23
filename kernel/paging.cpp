@@ -24,6 +24,15 @@ constexpr uint64_t kAddrMask = 0x000FFFFFFFFFF000ULL;
 
 Table* g_pml4 = nullptr;
 
+// Extra individually-registered executable pages, besides the kernel's
+// own .text range — see paging::add_executable_page. Small fixed
+// capacity: this is only ever the one AP trampoline page so far, and
+// there's no dynamic allocation available this early (init() itself is
+// what makes allocation meaningful, via the direct map it builds).
+constexpr int kMaxExtraExecutablePages = 4;
+uint64_t g_extra_executable_pages[kMaxExtraExecutablePages];
+int g_extra_executable_page_count = 0;
+
 [[noreturn]] void panic(const char* msg) {
     serial::puts("[PANIC] paging::init: ");
     serial::puts(msg);
@@ -82,6 +91,23 @@ uint64_t permissions_for(uintptr_t phys) {
     if (phys >= text_start && phys < text_end) {
         return kPresent; // read + execute, not writable
     }
+    uintptr_t page = phys & kAddrMask;
+    for (int i = 0; i < g_extra_executable_page_count; i++) {
+        if (page == g_extra_executable_pages[i]) {
+            // Present + writable + executable — a deliberate, narrow W^X
+            // exception, unlike every other page in this kernel. The AP
+            // trampoline is the only page registered this way: the BSP
+            // must write (memcpy + patch) it, and the AP itself must
+            // execute from that exact same physical page in the instant
+            // right after enabling paging, before it's reached any other
+            // executable memory. A stricter design (write during copy,
+            // then flip to execute-only before the first SIPI) is
+            // possible but wasn't judged worth the added complexity for
+            // one boot-time-only page never touched again once every AP
+            // is up. See DECISIONS.md, stage 9.
+            return kPresent | kWritable;
+        }
+    }
     return kPresent | kWritable | kNx; // read + write, not executable
 }
 
@@ -101,6 +127,13 @@ constexpr uint32_t kEferMsr = 0xC0000080;
 constexpr uint64_t kEferNxe = 1ULL << 11;
 
 } // namespace
+
+void add_executable_page(uint64_t phys) {
+    if (g_extra_executable_page_count >= kMaxExtraExecutablePages) {
+        panic("add_executable_page: out of extra-executable-page slots");
+    }
+    g_extra_executable_pages[g_extra_executable_page_count++] = phys & kAddrMask;
+}
 
 void init() {
     g_pml4 = alloc_table();
@@ -130,5 +163,7 @@ void map_mmio(uint64_t phys) {
     uint64_t page = phys & kAddrMask;
     map_page(page, page, kWritable | kNx);
 }
+
+uint64_t root_table_physical() { return reinterpret_cast<uint64_t>(g_pml4); }
 
 } // namespace paging

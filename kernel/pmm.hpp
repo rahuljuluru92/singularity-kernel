@@ -20,6 +20,14 @@ void init(efi::Handle image_handle, efi::SystemTable* system_table);
 std::uintptr_t alloc_page();
 void free_page(std::uintptr_t physical_address);
 
+// Marks a specific, already-known physical page permanently used, without
+// going through alloc() — for physical addresses something outside this
+// allocator's normal alloc/free traffic needs reserved (e.g. the fixed
+// low-memory address the AP trampoline is copied to — see
+// kernel/smp.hpp). Idempotent, like mark_used itself. Must run before
+// anything else has a chance to alloc_page() the same address.
+void reserve_page(std::uintptr_t physical_address);
+
 // Returns the physical address of the first of `count` physically
 // contiguous pages, or 0 on failure. For hardware (like a virtqueue)
 // that's handed one base address and assumes everything after it is
