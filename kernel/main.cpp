@@ -1,4 +1,8 @@
+#include "acpi.hpp"
 #include "efi.hpp"
+#include "ioapic.hpp"
+#include "lapic.hpp"
+#include "smp.hpp"
 #include "fat32.hpp"
 #include "gdt.hpp"
 #include "heap.hpp"
@@ -304,6 +308,11 @@ extern "C" void kernel_main(efi::Handle image_handle, efi::SystemTable* system_t
     // Only now do we own the machine outright.
     asm volatile("cli");
 
+    // Must happen before paging::init() below — it decides, once, which
+    // physical pages get read+execute permissions, and the AP trampoline
+    // page needs to be one of them. See DECISIONS.md, stage 9.
+    smp::reserve_trampoline_page();
+
     gdt::init();
     serial::puts("[OK] gdt\r\n");
 
@@ -319,6 +328,19 @@ extern "C" void kernel_main(efi::Handle image_handle, efi::SystemTable* system_t
 
     paging::init(); // prints [OK] paging, [OK] higher-half
 
+    // ACPI's configuration-table pointer and everything it leads to
+    // (XSDT, MADT) live in ordinary physical memory this kernel's own
+    // identity map now covers — safe to walk from here on, same as any
+    // other raw-physical-pointer access in this codebase.
+    acpi::init(system_table); // prints [OK] acpi madt lapics=... ioapics=...
+
+    lapic::enable();
+    serial::puts("[OK] lapic id=");
+    serial::put_hex(lapic::id());
+    serial::puts("\r\n");
+
+    ioapic::init();
+
     divide_by_zero_test();
     wx_enforcement_test();
 
@@ -329,6 +351,12 @@ extern "C" void kernel_main(efi::Handle image_handle, efi::SystemTable* system_t
     serial::put_hex(heap::used_bytes());
     serial::puts("\r\n");
     heap_torture_test();
+
+    // Every other enabled core the MADT reported, brought up and running
+    // independently — the actual proof, not just "detected." No
+    // scheduler routes work to them yet (stage 10); each parks idle,
+    // interrupts masked, right after printing its own id.
+    smp::bring_up_all_aps();
 
     pic::init();
     pit::init(100); // 100 Hz — see DECISIONS.md

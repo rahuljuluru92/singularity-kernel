@@ -8,7 +8,7 @@ CXXFLAGS := -std=c++23 -ffreestanding \
             -fno-exceptions -fno-rtti -fno-ident \
             -fno-asynchronous-unwind-tables -fno-unwind-tables \
             -Wall -Wextra \
-            -Iinclude -Ikernel -Ipmm -Iheap
+            -Iinclude -Ikernel -Ipmm -Iheap -Iacpi
 
 NASMFLAGS := -f elf64
 
@@ -35,10 +35,16 @@ CXX_OBJS := $(BUILD)/boot.o \
             $(BUILD)/pci.o \
             $(BUILD)/virtio_blk.o \
             $(BUILD)/fat32.o \
-            $(BUILD)/shell.o
+            $(BUILD)/shell.o \
+            $(BUILD)/madt_parser.o \
+            $(BUILD)/acpi.o \
+            $(BUILD)/lapic.o \
+            $(BUILD)/ioapic.o \
+            $(BUILD)/smp.o
 
 ASM_OBJS := $(BUILD)/gdt_flush.o \
-            $(BUILD)/isr_stubs.o
+            $(BUILD)/isr_stubs.o \
+            $(BUILD)/ap_trampoline_blob.o
 
 OBJS := $(CXX_OBJS) $(ASM_OBJS)
 
@@ -50,7 +56,7 @@ $(BUILD)/boot.o: boot/boot.cpp include/serial.hpp kernel/efi.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD)/main.o: kernel/main.cpp kernel/gdt.hpp kernel/idt.hpp kernel/isr.hpp kernel/pmm.hpp kernel/paging.hpp kernel/heap.hpp kernel/pic.hpp kernel/pit.hpp kernel/sched.hpp kernel/virtio_blk.hpp kernel/fat32.hpp kernel/shell.hpp include/serial.hpp
+$(BUILD)/main.o: kernel/main.cpp kernel/acpi.hpp kernel/lapic.hpp kernel/ioapic.hpp kernel/smp.hpp kernel/gdt.hpp kernel/idt.hpp kernel/isr.hpp kernel/pmm.hpp kernel/paging.hpp kernel/heap.hpp kernel/pic.hpp kernel/pit.hpp kernel/sched.hpp kernel/virtio_blk.hpp kernel/fat32.hpp kernel/shell.hpp include/serial.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
@@ -94,6 +100,26 @@ $(BUILD)/shell.o: kernel/shell.cpp kernel/shell.hpp kernel/fat32.hpp kernel/heap
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
+$(BUILD)/madt_parser.o: acpi/madt_parser.cpp acpi/madt_parser.hpp
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/acpi.o: kernel/acpi.cpp kernel/acpi.hpp kernel/efi.hpp acpi/madt_parser.hpp include/serial.hpp
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/lapic.o: kernel/lapic.cpp kernel/lapic.hpp include/serial.hpp
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/ioapic.o: kernel/ioapic.cpp kernel/ioapic.hpp kernel/acpi.hpp kernel/paging.hpp include/serial.hpp
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/smp.o: kernel/smp.cpp kernel/smp.hpp kernel/acpi.hpp pmm/bitmap_allocator.hpp kernel/gdt.hpp kernel/heap.hpp kernel/idt.hpp kernel/lapic.hpp kernel/paging.hpp kernel/pmm.hpp include/serial.hpp
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
 $(BUILD)/pmm.o: kernel/pmm.cpp kernel/pmm.hpp kernel/efi.hpp pmm/bitmap_allocator.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
@@ -126,6 +152,19 @@ $(BUILD)/isr_stubs.o: kernel/isr_stubs.asm
 	@mkdir -p $(BUILD)
 	$(NASM) $(NASMFLAGS) $< -o $@
 
+# The AP trampoline is assembled as a flat binary (its own `org`, no ELF
+# wrapper) since it must run as raw machine code copied verbatim to a
+# fixed physical address — see kernel/ap_trampoline.asm.
+$(BUILD)/ap_trampoline.bin: kernel/ap_trampoline.asm
+	@mkdir -p $(BUILD)
+	$(NASM) -f bin $< -o $@
+
+# Embeds that flat binary into the normal ELF64 link via incbin — see
+# kernel/ap_trampoline_blob.asm. Must be assembled after the .bin exists.
+$(BUILD)/ap_trampoline_blob.o: kernel/ap_trampoline_blob.asm $(BUILD)/ap_trampoline.bin
+	@mkdir -p $(BUILD)
+	$(NASM) $(NASMFLAGS) $< -o $@
+
 $(BUILD)/kernel.efi: $(OBJS) linker/uefi.ld
 	$(LD) $(LDFLAGS) -o $@ $(OBJS)
 
@@ -146,16 +185,17 @@ test-boot: all
 # host's own compiler — not the freestanding cross-compiler — and run
 # directly, no QEMU involved. See CLAUDE.md's Testing section.
 CATCH2_PREFIX := $(shell brew --prefix catch2)
-TEST_CXXFLAGS := -std=c++23 -Wall -Wextra -Ipmm -Iheap -I$(CATCH2_PREFIX)/include
+TEST_CXXFLAGS := -std=c++23 -Wall -Wextra -Ipmm -Iheap -Iacpi -I$(CATCH2_PREFIX)/include
 TEST_LDFLAGS  := -L$(CATCH2_PREFIX)/lib -lCatch2Main -lCatch2
 TEST_BIN      := $(BUILD)/host_tests
 TEST_SRCS     := tests/test_bitmap_allocator.cpp pmm/bitmap_allocator.cpp \
-                  tests/test_freelist_allocator.cpp heap/freelist_allocator.cpp
+                  tests/test_freelist_allocator.cpp heap/freelist_allocator.cpp \
+                  tests/test_madt_parser.cpp acpi/madt_parser.cpp
 
 .PHONY: test
 test: $(TEST_BIN)
 	$(TEST_BIN)
 
-$(TEST_BIN): $(TEST_SRCS) pmm/bitmap_allocator.hpp heap/freelist_allocator.hpp
+$(TEST_BIN): $(TEST_SRCS) pmm/bitmap_allocator.hpp heap/freelist_allocator.hpp acpi/madt_parser.hpp
 	@mkdir -p $(BUILD)
 	c++ $(TEST_CXXFLAGS) $(TEST_SRCS) -o $@ $(TEST_LDFLAGS)

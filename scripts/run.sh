@@ -20,6 +20,8 @@ fi
 
 exec qemu-system-x86_64 \
     -machine q35 \
+    -cpu qemu64,+x2apic \
+    -smp 4 \
     -m 256M \
     -drive if=pflash,format=raw,unit=0,file="$OVMF_CODE",readonly=on \
     -drive if=pflash,format=raw,unit=1,file="$VARS" \
