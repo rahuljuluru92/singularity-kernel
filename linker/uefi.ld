@@ -19,9 +19,11 @@ SECTIONS
 
   .text __image_base__ + (__section_alignment__ < 0x1000 ? . : __section_alignment__) :
   {
+    __text_start = .;
     *(.text)
     *(.text.*)
-    . = ALIGN(8);
+    . = ALIGN(0x1000); /* page-align so W^X permissions apply per-page cleanly */
+    __text_end = .;
   }
 
   .data BLOCK(__section_alignment__) :

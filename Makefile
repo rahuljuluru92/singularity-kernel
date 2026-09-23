@@ -8,7 +8,7 @@ CXXFLAGS := -std=c++23 -ffreestanding \
             -fno-exceptions -fno-rtti -fno-ident \
             -fno-asynchronous-unwind-tables -fno-unwind-tables \
             -Wall -Wextra \
-            -Iinclude -Ikernel
+            -Iinclude -Ikernel -Ipmm
 
 NASMFLAGS := -f elf64
 
@@ -22,7 +22,10 @@ CXX_OBJS := $(BUILD)/boot.o \
             $(BUILD)/main.o \
             $(BUILD)/gdt.o \
             $(BUILD)/idt.o \
-            $(BUILD)/isr.o
+            $(BUILD)/isr.o \
+            $(BUILD)/pmm.o \
+            $(BUILD)/bitmap_allocator.o \
+            $(BUILD)/paging.o
 
 ASM_OBJS := $(BUILD)/gdt_flush.o \
             $(BUILD)/isr_stubs.o
@@ -33,11 +36,23 @@ OBJS := $(CXX_OBJS) $(ASM_OBJS)
 
 all: $(ESP)/EFI/BOOT/BOOTX64.EFI
 
-$(BUILD)/boot.o: boot/boot.cpp include/serial.hpp
+$(BUILD)/boot.o: boot/boot.cpp include/serial.hpp kernel/efi.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD)/main.o: kernel/main.cpp kernel/gdt.hpp kernel/idt.hpp include/serial.hpp
+$(BUILD)/main.o: kernel/main.cpp kernel/gdt.hpp kernel/idt.hpp kernel/isr.hpp kernel/pmm.hpp kernel/paging.hpp include/serial.hpp
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/pmm.o: kernel/pmm.cpp kernel/pmm.hpp kernel/efi.hpp pmm/bitmap_allocator.hpp
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/paging.o: kernel/paging.cpp kernel/paging.hpp kernel/pmm.hpp pmm/bitmap_allocator.hpp
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/bitmap_allocator.o: pmm/bitmap_allocator.cpp pmm/bitmap_allocator.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
@@ -76,3 +91,19 @@ run: all
 
 test-boot: all
 	./scripts/test-boot.sh
+
+# Host-side unit tests for OS-independent logic (pmm/), compiled with the
+# host's own compiler — not the freestanding cross-compiler — and run
+# directly, no QEMU involved. See CLAUDE.md's Testing section.
+CATCH2_PREFIX := $(shell brew --prefix catch2)
+TEST_CXXFLAGS := -std=c++23 -Wall -Wextra -Ipmm -I$(CATCH2_PREFIX)/include
+TEST_LDFLAGS  := -L$(CATCH2_PREFIX)/lib -lCatch2Main -lCatch2
+TEST_BIN      := $(BUILD)/host_tests
+
+.PHONY: test
+test: $(TEST_BIN)
+	$(TEST_BIN)
+
+$(TEST_BIN): tests/test_bitmap_allocator.cpp pmm/bitmap_allocator.cpp pmm/bitmap_allocator.hpp
+	@mkdir -p $(BUILD)
+	c++ $(TEST_CXXFLAGS) tests/test_bitmap_allocator.cpp pmm/bitmap_allocator.cpp -o $@ $(TEST_LDFLAGS)

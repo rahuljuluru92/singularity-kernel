@@ -1,0 +1,12 @@
+#pragma once
+
+#include <cstddef>
+
+// See include/cstdint for why this exists. Only placement new is provided
+// — this project has no heap yet (that's stage 4), so ordinary
+// throwing/non-throwing new/delete aren't defined here at all; the linker
+// will correctly complain if anything ends up calling them before then.
+inline void* operator new(std::size_t, void* p) noexcept { return p; }
+inline void* operator new[](std::size_t, void* p) noexcept { return p; }
+inline void operator delete(void*, void*) noexcept {}
+inline void operator delete[](void*, void*) noexcept {}
