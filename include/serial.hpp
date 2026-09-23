@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 namespace serial {
 
 inline void outb(unsigned short port, unsigned char val) {
@@ -36,6 +38,16 @@ inline void putc(char c) {
 inline void puts(const char* s) {
     while (*s) {
         putc(*s++);
+    }
+}
+
+inline void put_hex(uint64_t value) {
+    putc('0');
+    putc('x');
+    for (int shift = 60; shift >= 0; shift -= 4) {
+        int nibble = (value >> shift) & 0xF;
+        putc(nibble < 10 ? static_cast<char>('0' + nibble)
+                          : static_cast<char>('a' + nibble - 10));
     }
 }
 
