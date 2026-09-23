@@ -41,4 +41,13 @@ inline uint64_t to_physical(uint64_t virt) {
 // permanently rather than torn down after the switch.
 void init();
 
+// Maps one additional page at its physical address (identity alias only
+// — MMIO windows like the I/O APIC's aren't RAM pmm tracks, so they were
+// never covered by init()'s all-tracked-pages loop, and there's no
+// meaningful "higher-half alias of a device register" for anything that
+// wants one). Present + writable + NX, matching how init() treats every
+// non-.text page. Must run after init() — reuses its page tables. phys
+// is truncated down to its containing page if not already page-aligned.
+void map_mmio(uint64_t phys);
+
 } // namespace paging

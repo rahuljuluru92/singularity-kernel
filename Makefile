@@ -38,7 +38,8 @@ CXX_OBJS := $(BUILD)/boot.o \
             $(BUILD)/shell.o \
             $(BUILD)/madt_parser.o \
             $(BUILD)/acpi.o \
-            $(BUILD)/lapic.o
+            $(BUILD)/lapic.o \
+            $(BUILD)/ioapic.o
 
 ASM_OBJS := $(BUILD)/gdt_flush.o \
             $(BUILD)/isr_stubs.o
@@ -53,7 +54,7 @@ $(BUILD)/boot.o: boot/boot.cpp include/serial.hpp kernel/efi.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD)/main.o: kernel/main.cpp kernel/acpi.hpp kernel/gdt.hpp kernel/idt.hpp kernel/isr.hpp kernel/pmm.hpp kernel/paging.hpp kernel/heap.hpp kernel/pic.hpp kernel/pit.hpp kernel/sched.hpp kernel/virtio_blk.hpp kernel/fat32.hpp kernel/shell.hpp include/serial.hpp
+$(BUILD)/main.o: kernel/main.cpp kernel/acpi.hpp kernel/lapic.hpp kernel/ioapic.hpp kernel/gdt.hpp kernel/idt.hpp kernel/isr.hpp kernel/pmm.hpp kernel/paging.hpp kernel/heap.hpp kernel/pic.hpp kernel/pit.hpp kernel/sched.hpp kernel/virtio_blk.hpp kernel/fat32.hpp kernel/shell.hpp include/serial.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
@@ -106,6 +107,10 @@ $(BUILD)/acpi.o: kernel/acpi.cpp kernel/acpi.hpp kernel/efi.hpp acpi/madt_parser
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD)/lapic.o: kernel/lapic.cpp kernel/lapic.hpp include/serial.hpp
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/ioapic.o: kernel/ioapic.cpp kernel/ioapic.hpp kernel/acpi.hpp kernel/paging.hpp include/serial.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 

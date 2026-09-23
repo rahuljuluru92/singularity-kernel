@@ -126,4 +126,9 @@ higher_half_entry:
     serial::puts("[OK] higher-half\r\n");
 }
 
+void map_mmio(uint64_t phys) {
+    uint64_t page = phys & kAddrMask;
+    map_page(page, page, kWritable | kNx);
+}
+
 } // namespace paging

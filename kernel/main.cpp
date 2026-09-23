@@ -1,5 +1,6 @@
 #include "acpi.hpp"
 #include "efi.hpp"
+#include "ioapic.hpp"
 #include "lapic.hpp"
 #include "fat32.hpp"
 #include "gdt.hpp"
@@ -331,6 +332,8 @@ extern "C" void kernel_main(efi::Handle image_handle, efi::SystemTable* system_t
     serial::puts("[OK] lapic id=");
     serial::put_hex(lapic::id());
     serial::puts("\r\n");
+
+    ioapic::init();
 
     divide_by_zero_test();
     wx_enforcement_test();
