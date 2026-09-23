@@ -10,6 +10,7 @@
 #include "pmm.hpp"
 #include "sched.hpp"
 #include "serial.hpp"
+#include "shell.hpp"
 #include "virtio_blk.hpp"
 
 namespace {
@@ -344,7 +345,5 @@ extern "C" void kernel_main(efi::Handle image_handle, efi::SystemTable* system_t
     disk_io_test();
     disk_io_torture_test();
 
-    for (;;) {
-        asm volatile("hlt");
-    }
+    shell::run(); // never returns
 }

@@ -103,6 +103,32 @@ void format_8_3(const char* name, uint8_t out[11]) {
     }
 }
 
+// Inverse of format_8_3: "HELLO   TXT" -> "HELLO.TXT" (or just "HELLO"
+// if the extension is all spaces). out must have room for 13 bytes
+// (8 + '.' + 3 + '\0').
+void unformat_8_3(const uint8_t name[11], char* out) {
+    int out_i = 0;
+    int name_end = 8;
+    while (name_end > 0 && name[name_end - 1] == ' ') {
+        name_end--;
+    }
+    for (int i = 0; i < name_end; i++) {
+        out[out_i++] = static_cast<char>(name[i]);
+    }
+
+    int ext_end = 11;
+    while (ext_end > 8 && name[ext_end - 1] == ' ') {
+        ext_end--;
+    }
+    if (ext_end > 8) {
+        out[out_i++] = '.';
+        for (int i = 8; i < ext_end; i++) {
+            out[out_i++] = static_cast<char>(name[i]);
+        }
+    }
+    out[out_i] = '\0';
+}
+
 uint32_t cluster_to_lba(uint32_t cluster) {
     return g_first_data_sector + (cluster - 2) * g_bpb.sectors_per_cluster;
 }
@@ -229,6 +255,36 @@ int read_file(const char* name, void* buf, std::size_t buf_size) {
     heap::kfree(cluster_buf);
 
     return static_cast<int>(copied);
+}
+
+void list_root(void (*callback)(const char* name, uint32_t size)) {
+    uint8_t* cluster_buf = static_cast<uint8_t*>(heap::kmalloc(g_bytes_per_cluster));
+    uint32_t cluster = g_bpb.root_cluster;
+
+    while (cluster < kEndOfChainMin) {
+        if (!virtio_blk::read_sectors(cluster_to_lba(cluster), g_bpb.sectors_per_cluster, cluster_buf)) {
+            panic("failed to read root directory cluster");
+        }
+
+        auto* entries = reinterpret_cast<DirEntry*>(cluster_buf);
+        uint32_t entry_count = g_bytes_per_cluster / sizeof(DirEntry);
+        for (uint32_t i = 0; i < entry_count; i++) {
+            DirEntry& e = entries[i];
+            if (e.name[0] == 0x00) {
+                heap::kfree(cluster_buf);
+                return; // end of directory
+            }
+            if (e.name[0] == kNameFreeRest || e.attr == kAttrLongName || (e.attr & kAttrVolumeId)) {
+                continue;
+            }
+            char name[13];
+            unformat_8_3(e.name, name);
+            callback(name, e.file_size);
+        }
+
+        cluster = next_cluster(cluster);
+    }
+    heap::kfree(cluster_buf);
 }
 
 } // namespace fat32

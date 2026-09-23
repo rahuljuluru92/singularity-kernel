@@ -28,4 +28,9 @@ uint64_t on_timer_tick(uint64_t current_rsp);
 // demo/torture tasks is done.
 int tasks_finished();
 
+// Calls callback once per task slot that's ever been used (including
+// task 0 and finished-but-not-yet-reused ones), for the shell's `tasks`
+// command.
+void for_each_task(void (*callback)(int id, const char* name, bool active));
+
 } // namespace sched
