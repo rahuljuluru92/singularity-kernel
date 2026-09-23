@@ -118,4 +118,10 @@ uint64_t on_timer_tick(uint64_t current_rsp) {
 
 int tasks_finished() { return g_tasks_finished; }
 
+void for_each_task(void (*callback)(int id, const char* name, bool active)) {
+    for (int i = 0; i < g_task_count; i++) {
+        callback(i, g_tasks[i].name, g_tasks[i].active);
+    }
+}
+
 } // namespace sched
