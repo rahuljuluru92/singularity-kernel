@@ -1,0 +1,15 @@
+#pragma once
+
+// See include/cstdint for why this exists: Homebrew's x86_64-elf-gcc ships
+// no libstdc++, so freestanding-mandatory headers are hand-rolled here.
+namespace std {
+
+using size_t = __SIZE_TYPE__;
+using ptrdiff_t = __PTRDIFF_TYPE__;
+using nullptr_t = decltype(nullptr);
+
+} // namespace std
+
+using std::nullptr_t;
+using std::ptrdiff_t;
+using std::size_t;
