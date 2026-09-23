@@ -22,12 +22,6 @@ constexpr uint64_t kWritable = 1ULL << 1;
 constexpr uint64_t kNx = 1ULL << 63;
 constexpr uint64_t kAddrMask = 0x000FFFFFFFFFF000ULL;
 
-// Start of the canonical higher half for 4-level paging (bit 47 set,
-// sign-extended). Everything pmm tracks gets a second alias here, at a
-// fixed physical-address offset — see DECISIONS.md for why the low
-// identity alias is kept alongside it rather than replaced.
-constexpr uint64_t kHigherHalfBase = 0xFFFF800000000000ULL;
-
 Table* g_pml4 = nullptr;
 
 [[noreturn]] void panic(const char* msg) {
@@ -115,8 +109,8 @@ void init() {
     for (std::size_t i = 0; i < pages; i++) {
         uint64_t phys = static_cast<uint64_t>(i) * pmm::kPageSize;
         uint64_t flags = permissions_for(phys);
-        map_page(phys, phys, flags);                   // low identity alias
-        map_page(phys + kHigherHalfBase, phys, flags);  // higher-half alias
+        map_page(phys, phys, flags);                      // low identity alias
+        map_page(to_higher_half(phys), phys, flags);       // higher-half alias
     }
 
     write_msr(kEferMsr, read_msr(kEferMsr) | kEferNxe);
