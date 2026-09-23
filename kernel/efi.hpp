@@ -85,6 +85,41 @@ constexpr bool is_real_ram(std::uint32_t type) {
     }
 }
 
+// EFI_GUID / EFI_CONFIGURATION_TABLE — enough of the spec to walk
+// SystemTable::configuration_table looking for the ACPI RSDP. See
+// DECISIONS.md, stage 9.
+struct [[gnu::packed]] Guid {
+    std::uint32_t data1;
+    std::uint16_t data2;
+    std::uint16_t data3;
+    std::uint8_t data4[8];
+
+    constexpr bool operator==(const Guid& other) const {
+        if (data1 != other.data1 || data2 != other.data2 || data3 != other.data3) {
+            return false;
+        }
+        for (int i = 0; i < 8; i++) {
+            if (data4[i] != other.data4[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+};
+
+// ACPI 2.0+ table GUID (EFI_ACPI_20_TABLE_GUID). Preferred over the ACPI
+// 1.0 GUID (EFI_ACPI_TABLE_GUID, {eb9d2d30-2d88-11d3-9a16-0090273fc14d})
+// when both are present — 2.0's RSDP carries the 64-bit XsdtAddress this
+// project's ACPI code reads. OVMF always publishes both; the 1.0 GUID is
+// not handled since nothing in this project's QEMU/OVMF target lacks 2.0.
+constexpr Guid kAcpi20TableGuid = {
+    0x8868e871, 0xe4f1, 0x11d3, {0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81}};
+
+struct ConfigurationTable {
+    Guid vendor_guid;
+    void* vendor_table;
+};
+
 using GetMemoryMapFn = EFIAPI Status (*)(std::uintptr_t* memory_map_size,
                                           MemoryDescriptor* memory_map,
                                           std::uintptr_t* map_key,
@@ -169,7 +204,7 @@ struct SystemTable {
     void* runtime_services;
     BootServices* boot_services;
     std::uintptr_t number_of_table_entries;
-    void* configuration_table;
+    ConfigurationTable* configuration_table;
 };
 
 } // namespace efi

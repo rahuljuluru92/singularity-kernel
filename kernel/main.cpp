@@ -1,3 +1,4 @@
+#include "acpi.hpp"
 #include "efi.hpp"
 #include "fat32.hpp"
 #include "gdt.hpp"
@@ -318,6 +319,12 @@ extern "C" void kernel_main(efi::Handle image_handle, efi::SystemTable* system_t
     pmm_torture_test();
 
     paging::init(); // prints [OK] paging, [OK] higher-half
+
+    // ACPI's configuration-table pointer and everything it leads to
+    // (XSDT, MADT) live in ordinary physical memory this kernel's own
+    // identity map now covers — safe to walk from here on, same as any
+    // other raw-physical-pointer access in this codebase.
+    acpi::init(system_table); // prints [OK] acpi madt lapics=... ioapics=...
 
     divide_by_zero_test();
     wx_enforcement_test();

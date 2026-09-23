@@ -8,7 +8,7 @@ CXXFLAGS := -std=c++23 -ffreestanding \
             -fno-exceptions -fno-rtti -fno-ident \
             -fno-asynchronous-unwind-tables -fno-unwind-tables \
             -Wall -Wextra \
-            -Iinclude -Ikernel -Ipmm -Iheap
+            -Iinclude -Ikernel -Ipmm -Iheap -Iacpi
 
 NASMFLAGS := -f elf64
 
@@ -35,7 +35,9 @@ CXX_OBJS := $(BUILD)/boot.o \
             $(BUILD)/pci.o \
             $(BUILD)/virtio_blk.o \
             $(BUILD)/fat32.o \
-            $(BUILD)/shell.o
+            $(BUILD)/shell.o \
+            $(BUILD)/madt_parser.o \
+            $(BUILD)/acpi.o
 
 ASM_OBJS := $(BUILD)/gdt_flush.o \
             $(BUILD)/isr_stubs.o
@@ -50,7 +52,7 @@ $(BUILD)/boot.o: boot/boot.cpp include/serial.hpp kernel/efi.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD)/main.o: kernel/main.cpp kernel/gdt.hpp kernel/idt.hpp kernel/isr.hpp kernel/pmm.hpp kernel/paging.hpp kernel/heap.hpp kernel/pic.hpp kernel/pit.hpp kernel/sched.hpp kernel/virtio_blk.hpp kernel/fat32.hpp kernel/shell.hpp include/serial.hpp
+$(BUILD)/main.o: kernel/main.cpp kernel/acpi.hpp kernel/gdt.hpp kernel/idt.hpp kernel/isr.hpp kernel/pmm.hpp kernel/paging.hpp kernel/heap.hpp kernel/pic.hpp kernel/pit.hpp kernel/sched.hpp kernel/virtio_blk.hpp kernel/fat32.hpp kernel/shell.hpp include/serial.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
@@ -91,6 +93,14 @@ $(BUILD)/fat32.o: kernel/fat32.cpp kernel/fat32.hpp kernel/virtio_blk.hpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD)/shell.o: kernel/shell.cpp kernel/shell.hpp kernel/fat32.hpp kernel/heap.hpp kernel/pmm.hpp kernel/sched.hpp include/serial.hpp
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/madt_parser.o: acpi/madt_parser.cpp acpi/madt_parser.hpp
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/acpi.o: kernel/acpi.cpp kernel/acpi.hpp kernel/efi.hpp acpi/madt_parser.hpp include/serial.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
@@ -146,16 +156,17 @@ test-boot: all
 # host's own compiler — not the freestanding cross-compiler — and run
 # directly, no QEMU involved. See CLAUDE.md's Testing section.
 CATCH2_PREFIX := $(shell brew --prefix catch2)
-TEST_CXXFLAGS := -std=c++23 -Wall -Wextra -Ipmm -Iheap -I$(CATCH2_PREFIX)/include
+TEST_CXXFLAGS := -std=c++23 -Wall -Wextra -Ipmm -Iheap -Iacpi -I$(CATCH2_PREFIX)/include
 TEST_LDFLAGS  := -L$(CATCH2_PREFIX)/lib -lCatch2Main -lCatch2
 TEST_BIN      := $(BUILD)/host_tests
 TEST_SRCS     := tests/test_bitmap_allocator.cpp pmm/bitmap_allocator.cpp \
-                  tests/test_freelist_allocator.cpp heap/freelist_allocator.cpp
+                  tests/test_freelist_allocator.cpp heap/freelist_allocator.cpp \
+                  tests/test_madt_parser.cpp acpi/madt_parser.cpp
 
 .PHONY: test
 test: $(TEST_BIN)
 	$(TEST_BIN)
 
-$(TEST_BIN): $(TEST_SRCS) pmm/bitmap_allocator.hpp heap/freelist_allocator.hpp
+$(TEST_BIN): $(TEST_SRCS) pmm/bitmap_allocator.hpp heap/freelist_allocator.hpp acpi/madt_parser.hpp
 	@mkdir -p $(BUILD)
 	c++ $(TEST_CXXFLAGS) $(TEST_SRCS) -o $@ $(TEST_LDFLAGS)
