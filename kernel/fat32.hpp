@@ -18,4 +18,10 @@ void init();
 // buf_size), or -1 if no matching file was found in the root directory.
 int read_file(const char* name, void* buf, std::size_t buf_size);
 
+// Calls callback once per real (non-deleted, non-volume-label,
+// non-long-filename) root directory entry, with its name converted back
+// to ordinary "NAME.EXT" form (or just "NAME" with no dot if the
+// extension is empty) and its size in bytes.
+void list_root(void (*callback)(const char* name, uint32_t size));
+
 } // namespace fat32
