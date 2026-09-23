@@ -1,0 +1,13 @@
+# Local-only working notes (see CLAUDE.md) — never tracked
+ASSUMPTIONS.md
+DECISIONS.md
+
+# Build output
+/build/
+
+# OS / editor cruft
+.DS_Store
+*.swp
+*.swo
+.vscode/
+.idea/
