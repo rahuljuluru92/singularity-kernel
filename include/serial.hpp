@@ -66,6 +66,19 @@ inline void puts(const char* s) {
     }
 }
 
+// Blocks until a character is available, then returns it. hlt while
+// waiting rather than busy-spinning — this project has no UART IRQ
+// wired up (only the PIT, stage 5), so this can't sleep-until-exactly-
+// ready, but hlt still wakes on the timer tick at worst (every 10 ms at
+// the configured 100 Hz), which is a real, if coarse, efficiency win
+// over a tight poll loop. Used by kernel/shell.cpp.
+inline char getc() {
+    while ((inb(kCom1 + 5) & 0x01) == 0) {
+        asm volatile("hlt");
+    }
+    return static_cast<char>(inb(kCom1));
+}
+
 inline void put_hex(uint64_t value) {
     putc('0');
     putc('x');
