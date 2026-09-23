@@ -1,5 +1,6 @@
 #include "efi.hpp"
 #include "gdt.hpp"
+#include "heap.hpp"
 #include "idt.hpp"
 #include "isr.hpp"
 #include "paging.hpp"
@@ -7,6 +8,18 @@
 #include "serial.hpp"
 
 namespace {
+
+// Deterministic, not truly random — no <random> here, and a fixed seed
+// keeps the boot-test outcome reproducible run to run rather than flaky.
+struct Xorshift32 {
+    uint32_t state;
+    uint32_t next() {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        return state;
+    }
+};
 
 [[noreturn]] void panic(const char* msg) {
     serial::puts("[PANIC] ");
@@ -82,6 +95,61 @@ resume:
     serial::puts("[OK] w^x enforced\r\n");
 }
 
+// Mixed-size, interleaved-free heap torture test: up to kSlots concurrent
+// live allocations, each iteration either allocates a new one (varied
+// size, written with a unique byte pattern) into a free slot or frees an
+// occupied one — after first re-checking its pattern is still intact, the
+// actual proof of no corruption, not just "the allocator didn't crash".
+void heap_torture_test() {
+    constexpr int kSlots = 64;
+    constexpr int kIterations = 2000;
+
+    void* ptrs[kSlots] = {};
+    size_t sizes[kSlots] = {};
+    uint8_t patterns[kSlots] = {};
+
+    auto verify_and_clear = [&](int slot) {
+        auto* bytes = reinterpret_cast<uint8_t*>(ptrs[slot]);
+        for (size_t i = 0; i < sizes[slot]; i++) {
+            if (bytes[i] != static_cast<uint8_t>(patterns[slot] + i)) {
+                panic("heap torture: data corruption detected");
+            }
+        }
+        heap::kfree(ptrs[slot]);
+        ptrs[slot] = nullptr;
+    };
+
+    Xorshift32 rng{12345};
+    for (int iter = 0; iter < kIterations; iter++) {
+        int slot = static_cast<int>(rng.next() % kSlots);
+        if (ptrs[slot] == nullptr) {
+            size_t size = 16 + (rng.next() % 1009);
+            void* p = heap::kmalloc(size);
+            if (p == nullptr) {
+                panic("heap torture: kmalloc failed");
+            }
+            uint8_t pattern = static_cast<uint8_t>(rng.next());
+            auto* bytes = reinterpret_cast<uint8_t*>(p);
+            for (size_t i = 0; i < size; i++) {
+                bytes[i] = static_cast<uint8_t>(pattern + i);
+            }
+            ptrs[slot] = p;
+            sizes[slot] = size;
+            patterns[slot] = pattern;
+        } else {
+            verify_and_clear(slot);
+        }
+    }
+
+    for (int i = 0; i < kSlots; i++) {
+        if (ptrs[i] != nullptr) {
+            verify_and_clear(i);
+        }
+    }
+
+    serial::puts("[OK] heap torture\r\n");
+}
+
 } // namespace
 
 extern "C" void kernel_main(efi::Handle image_handle, efi::SystemTable* system_table) {
@@ -121,6 +189,14 @@ extern "C" void kernel_main(efi::Handle image_handle, efi::SystemTable* system_t
 
     divide_by_zero_test();
     wx_enforcement_test();
+
+    heap::init(); // prints [OK] heap
+    serial::puts("[OK] heap free_bytes=");
+    serial::put_hex(heap::free_bytes());
+    serial::puts(" used_bytes=");
+    serial::put_hex(heap::used_bytes());
+    serial::puts("\r\n");
+    heap_torture_test();
 
     for (;;) {
         asm volatile("cli\n\thlt");

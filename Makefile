@@ -8,7 +8,7 @@ CXXFLAGS := -std=c++23 -ffreestanding \
             -fno-exceptions -fno-rtti -fno-ident \
             -fno-asynchronous-unwind-tables -fno-unwind-tables \
             -Wall -Wextra \
-            -Iinclude -Ikernel -Ipmm
+            -Iinclude -Ikernel -Ipmm -Iheap
 
 NASMFLAGS := -f elf64
 
@@ -25,7 +25,10 @@ CXX_OBJS := $(BUILD)/boot.o \
             $(BUILD)/isr.o \
             $(BUILD)/pmm.o \
             $(BUILD)/bitmap_allocator.o \
-            $(BUILD)/paging.o
+            $(BUILD)/paging.o \
+            $(BUILD)/heap.o \
+            $(BUILD)/freelist_allocator.o \
+            $(BUILD)/mem.o
 
 ASM_OBJS := $(BUILD)/gdt_flush.o \
             $(BUILD)/isr_stubs.o
@@ -40,7 +43,19 @@ $(BUILD)/boot.o: boot/boot.cpp include/serial.hpp kernel/efi.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD)/main.o: kernel/main.cpp kernel/gdt.hpp kernel/idt.hpp kernel/isr.hpp kernel/pmm.hpp kernel/paging.hpp include/serial.hpp
+$(BUILD)/main.o: kernel/main.cpp kernel/gdt.hpp kernel/idt.hpp kernel/isr.hpp kernel/pmm.hpp kernel/paging.hpp kernel/heap.hpp include/serial.hpp
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/heap.o: kernel/heap.cpp kernel/heap.hpp kernel/paging.hpp kernel/pmm.hpp heap/freelist_allocator.hpp
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/freelist_allocator.o: heap/freelist_allocator.cpp heap/freelist_allocator.hpp
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/mem.o: kernel/mem.cpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
@@ -96,14 +111,16 @@ test-boot: all
 # host's own compiler — not the freestanding cross-compiler — and run
 # directly, no QEMU involved. See CLAUDE.md's Testing section.
 CATCH2_PREFIX := $(shell brew --prefix catch2)
-TEST_CXXFLAGS := -std=c++23 -Wall -Wextra -Ipmm -I$(CATCH2_PREFIX)/include
+TEST_CXXFLAGS := -std=c++23 -Wall -Wextra -Ipmm -Iheap -I$(CATCH2_PREFIX)/include
 TEST_LDFLAGS  := -L$(CATCH2_PREFIX)/lib -lCatch2Main -lCatch2
 TEST_BIN      := $(BUILD)/host_tests
+TEST_SRCS     := tests/test_bitmap_allocator.cpp pmm/bitmap_allocator.cpp \
+                  tests/test_freelist_allocator.cpp heap/freelist_allocator.cpp
 
 .PHONY: test
 test: $(TEST_BIN)
 	$(TEST_BIN)
 
-$(TEST_BIN): tests/test_bitmap_allocator.cpp pmm/bitmap_allocator.cpp pmm/bitmap_allocator.hpp
+$(TEST_BIN): $(TEST_SRCS) pmm/bitmap_allocator.hpp heap/freelist_allocator.hpp
 	@mkdir -p $(BUILD)
-	c++ $(TEST_CXXFLAGS) tests/test_bitmap_allocator.cpp pmm/bitmap_allocator.cpp -o $@ $(TEST_LDFLAGS)
+	c++ $(TEST_CXXFLAGS) $(TEST_SRCS) -o $@ $(TEST_LDFLAGS)

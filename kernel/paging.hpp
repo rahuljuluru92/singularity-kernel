@@ -1,6 +1,17 @@
 #pragma once
 
+#include <cstdint>
+
 namespace paging {
+
+// Start of the canonical higher half for 4-level paging (bit 47 set,
+// sign-extended) — the fixed offset init() maps every tracked physical
+// page to, in addition to its original low identity address. Exposed so
+// other kernel code (e.g. the heap) can translate a physical address pmm
+// hands out into its higher-half virtual alias.
+constexpr uint64_t kHigherHalfBase = 0xFFFF800000000000ULL;
+
+inline uint64_t to_higher_half(uint64_t phys) { return phys + kHigherHalfBase; }
 
 // Builds a fresh set of page tables: a direct map of all physical memory
 // pmm tracks, at both its original low (identity) address and a
