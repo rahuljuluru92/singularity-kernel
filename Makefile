@@ -37,7 +37,8 @@ CXX_OBJS := $(BUILD)/boot.o \
             $(BUILD)/fat32.o \
             $(BUILD)/shell.o \
             $(BUILD)/madt_parser.o \
-            $(BUILD)/acpi.o
+            $(BUILD)/acpi.o \
+            $(BUILD)/lapic.o
 
 ASM_OBJS := $(BUILD)/gdt_flush.o \
             $(BUILD)/isr_stubs.o
@@ -101,6 +102,10 @@ $(BUILD)/madt_parser.o: acpi/madt_parser.cpp acpi/madt_parser.hpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD)/acpi.o: kernel/acpi.cpp kernel/acpi.hpp kernel/efi.hpp acpi/madt_parser.hpp include/serial.hpp
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/lapic.o: kernel/lapic.cpp kernel/lapic.hpp include/serial.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 

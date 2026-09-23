@@ -1,5 +1,6 @@
 #include "acpi.hpp"
 #include "efi.hpp"
+#include "lapic.hpp"
 #include "fat32.hpp"
 #include "gdt.hpp"
 #include "heap.hpp"
@@ -325,6 +326,11 @@ extern "C" void kernel_main(efi::Handle image_handle, efi::SystemTable* system_t
     // identity map now covers — safe to walk from here on, same as any
     // other raw-physical-pointer access in this codebase.
     acpi::init(system_table); // prints [OK] acpi madt lapics=... ioapics=...
+
+    lapic::enable();
+    serial::puts("[OK] lapic id=");
+    serial::put_hex(lapic::id());
+    serial::puts("\r\n");
 
     divide_by_zero_test();
     wx_enforcement_test();
