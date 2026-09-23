@@ -34,7 +34,8 @@ CXX_OBJS := $(BUILD)/boot.o \
             $(BUILD)/sched.o \
             $(BUILD)/pci.o \
             $(BUILD)/virtio_blk.o \
-            $(BUILD)/fat32.o
+            $(BUILD)/fat32.o \
+            $(BUILD)/shell.o
 
 ASM_OBJS := $(BUILD)/gdt_flush.o \
             $(BUILD)/isr_stubs.o
@@ -49,7 +50,7 @@ $(BUILD)/boot.o: boot/boot.cpp include/serial.hpp kernel/efi.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD)/main.o: kernel/main.cpp kernel/gdt.hpp kernel/idt.hpp kernel/isr.hpp kernel/pmm.hpp kernel/paging.hpp kernel/heap.hpp kernel/pic.hpp kernel/pit.hpp kernel/sched.hpp kernel/virtio_blk.hpp kernel/fat32.hpp include/serial.hpp
+$(BUILD)/main.o: kernel/main.cpp kernel/gdt.hpp kernel/idt.hpp kernel/isr.hpp kernel/pmm.hpp kernel/paging.hpp kernel/heap.hpp kernel/pic.hpp kernel/pit.hpp kernel/sched.hpp kernel/virtio_blk.hpp kernel/fat32.hpp kernel/shell.hpp include/serial.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
@@ -86,6 +87,10 @@ $(BUILD)/virtio_blk.o: kernel/virtio_blk.cpp kernel/virtio_blk.hpp kernel/pci.hp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD)/fat32.o: kernel/fat32.cpp kernel/fat32.hpp kernel/virtio_blk.hpp
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/shell.o: kernel/shell.cpp kernel/shell.hpp kernel/fat32.hpp kernel/heap.hpp kernel/pmm.hpp kernel/sched.hpp include/serial.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
