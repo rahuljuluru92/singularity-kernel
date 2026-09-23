@@ -14,6 +14,31 @@ inline unsigned char inb(unsigned short port) {
     return ret;
 }
 
+// 16/32-bit port I/O — needed by PCI config space access and virtio's
+// legacy I/O-port device registers (kernel/pci.cpp, kernel/virtio_blk.cpp).
+// Homed here alongside outb/inb since they're equally generic, not
+// serial-specific, and this project already reuses this namespace's
+// port I/O elsewhere (e.g. kernel/pic.cpp).
+inline void outw(unsigned short port, unsigned short val) {
+    asm volatile("outw %0, %1" : : "a"(val), "Nd"(port));
+}
+
+inline unsigned short inw(unsigned short port) {
+    unsigned short ret;
+    asm volatile("inw %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
+
+inline void outl(unsigned short port, unsigned int val) {
+    asm volatile("outl %0, %1" : : "a"(val), "Nd"(port));
+}
+
+inline unsigned int inl(unsigned short port) {
+    unsigned int ret;
+    asm volatile("inl %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
+
 constexpr unsigned short kCom1 = 0x3F8;
 
 // 8N1, no FIFO tricks — just enough to get bytes onto the wire for

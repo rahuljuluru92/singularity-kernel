@@ -142,6 +142,14 @@ void free_page(std::uintptr_t physical_address) {
     g_allocator->free(static_cast<std::size_t>(physical_address / kPageSize));
 }
 
+std::uintptr_t alloc_contiguous_pages(std::size_t count) {
+    std::size_t idx = g_allocator->alloc_contiguous(count);
+    if (idx == BitmapAllocator::kInvalidPage) {
+        return 0;
+    }
+    return static_cast<std::uintptr_t>(idx) * kPageSize;
+}
+
 std::size_t total_pages() { return g_allocator->page_count(); }
 std::size_t free_pages() { return g_allocator->free_count(); }
 

@@ -97,6 +97,48 @@ TEST_CASE("out-of-range indices are ignored, not undefined behavior", "[bitmap]"
     REQUIRE(alloc.free_count() == 0);
 }
 
+TEST_CASE("alloc_contiguous returns a run of physically adjacent pages", "[bitmap]") {
+    std::uint8_t bitmap[4] = {0};
+    BitmapAllocator alloc(bitmap, 32);
+    alloc.mark_free_range(0, 32);
+
+    std::size_t start = alloc.alloc_contiguous(5);
+    REQUIRE(start != BitmapAllocator::kInvalidPage);
+    for (std::size_t i = 0; i < 5; i++) {
+        REQUIRE_FALSE(alloc.is_free(start + i));
+    }
+    REQUIRE(alloc.free_count() == 27);
+}
+
+TEST_CASE("alloc_contiguous skips a used page in the middle of an otherwise-free range",
+          "[bitmap]") {
+    std::uint8_t bitmap[4] = {0};
+    BitmapAllocator alloc(bitmap, 32);
+    alloc.mark_free_range(0, 32);
+    alloc.mark_used(3); // breaks the only run long enough to start at 0
+
+    std::size_t start = alloc.alloc_contiguous(4);
+    REQUIRE(start != BitmapAllocator::kInvalidPage);
+    REQUIRE(start != 0); // can't start at 0: page 3 would be included and isn't free
+    for (std::size_t i = 0; i < 4; i++) {
+        REQUIRE(alloc.is_free(start + i) == false);
+    }
+}
+
+TEST_CASE("alloc_contiguous fails without corrupting state when no run is long enough",
+          "[bitmap]") {
+    std::uint8_t bitmap[4] = {0};
+    BitmapAllocator alloc(bitmap, 32);
+    // Free only alternating pages — no run of 2 exists anywhere.
+    for (std::size_t i = 0; i < 32; i += 2) {
+        alloc.mark_free(i);
+    }
+    std::size_t before = alloc.free_count();
+
+    REQUIRE(alloc.alloc_contiguous(2) == BitmapAllocator::kInvalidPage);
+    REQUIRE(alloc.free_count() == before); // failed attempt must not partially allocate
+}
+
 TEST_CASE("alloc search wraps around the hint instead of only scanning forward", "[bitmap]") {
     std::uint8_t bitmap[4] = {0};
     BitmapAllocator alloc(bitmap, 32);

@@ -14,6 +14,9 @@ mkdir -p build
 if [ ! -f "$VARS" ]; then
     cp "$VARS_TEMPLATE" "$VARS"
 fi
+if [ ! -f build/disk.img ]; then
+    ./scripts/make-disk.sh
+fi
 
 exec qemu-system-x86_64 \
     -machine q35 \
@@ -21,6 +24,8 @@ exec qemu-system-x86_64 \
     -drive if=pflash,format=raw,unit=0,file="$OVMF_CODE",readonly=on \
     -drive if=pflash,format=raw,unit=1,file="$VARS" \
     -drive format=raw,file=fat:rw:build/esp \
+    -drive file=build/disk.img,format=raw,if=none,id=disk0 \
+    -device virtio-blk-pci,drive=disk0 \
     -serial stdio \
     -display none \
     -no-reboot
