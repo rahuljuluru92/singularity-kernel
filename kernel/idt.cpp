@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-extern "C" void* isr_stub_table[32];
+extern "C" void* isr_stub_table[33]; // vectors 0-31 (CPU exceptions) + 32 (PIT timer)
 
 namespace {
 
@@ -21,7 +21,7 @@ struct [[gnu::packed]] idtr {
     uint64_t base;
 };
 
-constexpr int kExceptionVectors = 32;
+constexpr int kInstalledVectors = 33; // 0-31 (CPU exceptions) + 32 (PIT timer)
 constexpr uint16_t kKernelCodeSelector = 0x08;
 constexpr uint8_t kInterruptGateFlags = 0x8E; // present, ring 0, 64-bit interrupt gate
 
@@ -44,7 +44,7 @@ void set_gate(int vector, uint64_t handler) {
 namespace idt {
 
 void init() {
-    for (int i = 0; i < kExceptionVectors; i++) {
+    for (int i = 0; i < kInstalledVectors; i++) {
         set_gate(i, reinterpret_cast<uint64_t>(isr_stub_table[i]));
     }
 

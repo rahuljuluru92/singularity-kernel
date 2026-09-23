@@ -14,7 +14,7 @@ if [ "${#MARKERS[@]}" -eq 0 ]; then
     MARKERS=("[OK] boot")
 fi
 
-BOOT_SECONDS=6
+BOOT_SECONDS=15 # stage 5's scheduler demos do real (if brief) busy-wait work
 
 OVMF_DIR="$(brew --prefix qemu)/share/qemu"
 OVMF_CODE="$OVMF_DIR/edk2-x86_64-code.fd"

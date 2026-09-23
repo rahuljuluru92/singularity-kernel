@@ -14,7 +14,13 @@ struct [[gnu::packed]] registers {
     uint64_t rip, cs, rflags, rsp, ss;
 };
 
-extern "C" void isr_handler(registers* regs);
+// Returns the RSP the assembly trampoline should resume from — almost
+// always just (uint64_t)regs itself (stay on the same stack/trap frame),
+// but this is also the mechanism stage 5's scheduler uses to switch
+// tasks: returning a DIFFERENT saved trap-frame pointer makes the
+// trampoline's pop-registers-then-iretq sequence resume a different
+// task's context instead. See isr_stubs.asm and kernel/sched.cpp.
+extern "C" uint64_t isr_handler(registers* regs);
 
 namespace isr {
 

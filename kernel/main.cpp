@@ -4,7 +4,10 @@
 #include "idt.hpp"
 #include "isr.hpp"
 #include "paging.hpp"
+#include "pic.hpp"
+#include "pit.hpp"
 #include "pmm.hpp"
+#include "sched.hpp"
 #include "serial.hpp"
 
 namespace {
@@ -150,6 +153,78 @@ void heap_torture_test() {
     serial::puts("[OK] heap torture\r\n");
 }
 
+// A few million empty iterations is enough wall-clock time in QEMU TCG
+// to span several 100 Hz (10 ms) timer ticks — deliberately long enough
+// that a demo task gets genuinely preempted mid-task by another one,
+// rather than finishing all its work inside a single tick (which would
+// make the serial log look sequential even though the scheduler really
+// is round-robining).
+void spin() {
+    for (volatile int i = 0; i < 3000000; i = i + 1) {
+    }
+}
+
+void demo_task(char name) {
+    for (int i = 1; i <= 5; i++) {
+        serial::puts("[TASK ");
+        serial::putc(name);
+        serial::puts("] iteration ");
+        serial::putc(static_cast<char>('0' + i));
+        serial::puts("\r\n");
+        spin();
+    }
+}
+
+void task_a() { demo_task('A'); }
+void task_b() { demo_task('B'); }
+void task_c() { demo_task('C'); }
+
+volatile int g_torture_counter = 0;
+
+// Short-lived on purpose: a small amount of busy work, one atomic
+// increment of a shared counter, then returns (task_exit via the
+// sched.cpp trampoline). A plain `g_torture_counter++` would compile to
+// a separate load/increment/store — not safe against being preempted
+// mid-sequence by another task incrementing the same counter, even on
+// one core. A single `incl` instruction on the memory operand can't be
+// interrupted mid-instruction, so it needs no lock prefix here (that's
+// for multi-core cache coherency, not relevant to this project's scope).
+void torture_task() {
+    for (volatile int i = 0; i < 50000; i = i + 1) {
+    }
+    asm volatile("incl %0" : "+m"(g_torture_counter));
+}
+
+void scheduler_interleaving_demo() {
+    sched::create_task(task_a, "A");
+    sched::create_task(task_b, "B");
+    sched::create_task(task_c, "C");
+
+    int target = sched::tasks_finished() + 3;
+    while (sched::tasks_finished() < target) {
+        asm volatile("hlt");
+    }
+    serial::puts("[OK] scheduler interleaving\r\n");
+}
+
+void scheduler_torture_test() {
+    constexpr int kTortureTasks = 50;
+    g_torture_counter = 0;
+
+    int start = sched::tasks_finished();
+    for (int i = 0; i < kTortureTasks; i++) {
+        sched::create_task(torture_task, "torture");
+    }
+    while (sched::tasks_finished() < start + kTortureTasks) {
+        asm volatile("hlt");
+    }
+
+    if (g_torture_counter != kTortureTasks) {
+        panic("scheduler torture: counter mismatch — lost or duplicated a task");
+    }
+    serial::puts("[OK] scheduler torture\r\n");
+}
+
 } // namespace
 
 extern "C" void kernel_main(efi::Handle image_handle, efi::SystemTable* system_table) {
@@ -198,7 +273,16 @@ extern "C" void kernel_main(efi::Handle image_handle, efi::SystemTable* system_t
     serial::puts("\r\n");
     heap_torture_test();
 
+    pic::init();
+    pit::init(100); // 100 Hz — see DECISIONS.md
+    sched::init();
+
+    asm volatile("sti"); // first time this project has ever enabled interrupts
+
+    scheduler_interleaving_demo();
+    scheduler_torture_test();
+
     for (;;) {
-        asm volatile("cli\n\thlt");
+        asm volatile("hlt");
     }
 }
