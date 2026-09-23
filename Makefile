@@ -28,7 +28,10 @@ CXX_OBJS := $(BUILD)/boot.o \
             $(BUILD)/paging.o \
             $(BUILD)/heap.o \
             $(BUILD)/freelist_allocator.o \
-            $(BUILD)/mem.o
+            $(BUILD)/mem.o \
+            $(BUILD)/pic.o \
+            $(BUILD)/pit.o \
+            $(BUILD)/sched.o
 
 ASM_OBJS := $(BUILD)/gdt_flush.o \
             $(BUILD)/isr_stubs.o
@@ -43,7 +46,7 @@ $(BUILD)/boot.o: boot/boot.cpp include/serial.hpp kernel/efi.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD)/main.o: kernel/main.cpp kernel/gdt.hpp kernel/idt.hpp kernel/isr.hpp kernel/pmm.hpp kernel/paging.hpp kernel/heap.hpp include/serial.hpp
+$(BUILD)/main.o: kernel/main.cpp kernel/gdt.hpp kernel/idt.hpp kernel/isr.hpp kernel/pmm.hpp kernel/paging.hpp kernel/heap.hpp kernel/pic.hpp kernel/pit.hpp kernel/sched.hpp include/serial.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
@@ -56,6 +59,18 @@ $(BUILD)/freelist_allocator.o: heap/freelist_allocator.cpp heap/freelist_allocat
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD)/mem.o: kernel/mem.cpp
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/pic.o: kernel/pic.cpp kernel/pic.hpp include/serial.hpp
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/pit.o: kernel/pit.cpp kernel/pit.hpp include/serial.hpp
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/sched.o: kernel/sched.cpp kernel/sched.hpp kernel/heap.hpp kernel/isr.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
@@ -79,7 +94,7 @@ $(BUILD)/idt.o: kernel/idt.cpp kernel/idt.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD)/isr.o: kernel/isr.cpp kernel/isr.hpp include/serial.hpp
+$(BUILD)/isr.o: kernel/isr.cpp kernel/isr.hpp kernel/pic.hpp kernel/sched.hpp include/serial.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 

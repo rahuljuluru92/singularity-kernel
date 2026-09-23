@@ -44,6 +44,13 @@ isr_common_stub:
     mov rdi, rsp
     call isr_handler
 
+    ; isr_handler returns (in rax) the trap-frame pointer to resume from —
+    ; almost always the same one it was called with, but for the timer
+    ; vector this is how sched::on_timer_tick actually switches tasks:
+    ; a different pointer here means the pops below (and the iretq) act
+    ; on a DIFFERENT task's saved context instead of this one's.
+    mov rsp, rax
+
     pop r15
     pop r14
     pop r13
@@ -96,6 +103,12 @@ ISR_NOERR 29
 ISR_NOERR 30
 ISR_NOERR 31
 
+; Vector 32 = IRQ0 (PIT timer), the only hardware interrupt this project
+; handles — remapped here from the PIC's power-on default (0-15, which
+; collides with CPU exceptions) by pic::init(). Same "no error code"
+; shape as any other IRQ.
+ISR_NOERR 32
+
 section .rodata
 global isr_stub_table
 isr_stub_table:
@@ -107,3 +120,4 @@ isr_stub_table:
     dq isr_stub_20, isr_stub_21, isr_stub_22, isr_stub_23
     dq isr_stub_24, isr_stub_25, isr_stub_26, isr_stub_27
     dq isr_stub_28, isr_stub_29, isr_stub_30, isr_stub_31
+    dq isr_stub_32
