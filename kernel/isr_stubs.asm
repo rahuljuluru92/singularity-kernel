@@ -50,7 +50,22 @@ isr_common_stub:
     ; a different pointer here means the pops below (and the iretq) act
     ; on a DIFFERENT task's saved context instead of this one's.
     mov rsp, rax
+    jmp resume_trap_frame_tail
 
+; extern "C" [[noreturn]] void resume_trap_frame(uint64_t rsp) — an
+; entry point into the SAME pop+iretq tail above, callable from normal
+; (non-interrupt) C++ code, not just from isr_common_stub. rsp arrives
+; in rdi per the SysV ABI's first-argument register. sched::task_exit
+; uses this to hand off directly to whatever task/idle-context runs
+; next, without ever needing an intermediate "parked" stack at all —
+; stage 10 originally used a small per-core scratch stack for this
+; instead, which turned out to have a real, hard-to-fully-pin-down
+; timing window; removing the intermediate stack removes the window
+; category entirely rather than continuing to chase it. See DECISIONS.md.
+global resume_trap_frame
+resume_trap_frame:
+    mov rsp, rdi
+resume_trap_frame_tail:
     pop r15
     pop r14
     pop r13

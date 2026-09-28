@@ -19,11 +19,9 @@ constexpr uint16_t kKernelDataSelector = 0x10;
 constexpr uint64_t kInterruptsEnabledFlag = 0x202; // reserved bit 1 + IF
 
 // A task's lifecycle: kFree (slot never used, or fully reclaimed) ->
-// kReady (sitting with a valid saved rsp, safe for its owning core to
-// resume OR for another core to steal) -> kRunning (currently executing
-// on owner_core, NOT stealable -- the invariant that makes stealing
-// safe) -> kFinished (task_exit() ran; owns nothing, resumed by no one,
-// its stack awaiting reclamation) -> back to kFree once reclaimed.
+// kReady (sitting with a valid saved rsp) -> kRunning (currently
+// executing on owner_core) -> kFinished (task_exit() ran; its stack is
+// awaiting reclamation) -> back to kFree once reclaimed.
 constexpr uint32_t kFree = 0;
 constexpr uint32_t kReady = 1;
 constexpr uint32_t kRunning = 2;
@@ -33,12 +31,12 @@ struct Task {
     uint64_t rsp;
     uint8_t* stack;
     const char* name;
-    volatile int32_t owner_core;
-    volatile uint32_t state;
+    int32_t owner_core;
+    uint32_t state;
 };
 
 Task g_tasks[kMaxTasks];
-int g_task_count = 0; // high-water mark of slots ever used (BSP-only, sequential)
+int g_task_count = 0; // high-water mark of slots ever used
 
 // Per-core state -- each array index is a core's own x2APIC id (see
 // DECISIONS.md: this project's QEMU target always gives small, dense,
@@ -46,25 +44,99 @@ int g_task_count = 0; // high-water mark of slots ever used (BSP-only, sequentia
 // directly as an array index needs no separate core-id-to-index table).
 uint64_t g_idle_rsp[kMaxCores];
 int g_current_index[kMaxCores]; // -1 = currently running this core's own idle context
-int g_completed_by_core[kMaxCores]; // only ever written by that one core
+int g_completed_by_core[kMaxCores];
+uint64_t g_tick_count[kMaxCores];
 
 volatile bool g_stealing_enabled = false;
 
-// A finished task's own stack becomes unsafe to free the instant it's
-// marked kFinished, NOT only once some other core actually reuses the
-// slot: with IST=0 (no automatic stack switch on interrupt — see
-// kernel/idt.cpp), a core sitting in task_exit()'s halt loop is still
-// using that task's stack as its live RSP, and the NEXT hardware
-// interrupt on that core would push its trap frame onto it. If the BSP's
-// create_task() frees and reuses that same memory for a new task in the
-// meantime, the two writes race for real — a genuine, reproduced bug
-// (see DECISIONS.md, stage 10) that manifested as iretq faulting on a
-// corrupted trap frame. Fixed by having every core immediately switch
-// off a finished task's stack onto its own small, dedicated, never-freed
-// scratch stack before ever halting — one per core, reused every time
-// (never concurrently, since a core only ever runs one task at a time).
-constexpr size_t kExitScratchStackSize = 256;
-alignas(16) uint8_t g_exit_scratch_stack[kMaxCores][kExitScratchStackSize];
+// See kernel/isr_stubs.asm — the same pop+iretq tail isr_common_stub
+// uses to resume a trap frame, exposed as a callable entry point for
+// normal (non-interrupt) code. task_exit() uses this to hand off
+// directly to whatever runs next, with no intermediate stack at all.
+extern "C" [[noreturn]] void resume_trap_frame(uint64_t rsp);
+
+// EVERY access to g_tasks/g_task_count/g_current_index/g_idle_rsp/
+// g_completed_by_core, from ANY core, in ANY context (interrupt or
+// normal), goes through this one global spinlock. This replaces an
+// earlier lock-free (single-CAS) design that hit a real, persistent,
+// intermittent corruption bug under genuine concurrent execution —
+// extensively debugged (see ASSUMPTIONS.md's Session 10 entry: ruled
+// out work-stealing itself, core count, codegen/CAS correctness, and
+// heap aliasing as the cause without finding the actual root cause) —
+// and pragmatically replaced with this much simpler, trivially-correct
+// design instead of continuing to chase it. The performance cost is
+// negligible at this project's scale: a handful of cores, a 100 Hz
+// tick, and an O(64) scan held under the lock for at most a few
+// microseconds. See DECISIONS.md, stage 10.
+//
+// Deadlock-safety: every caller that can hold this lock from NORMAL
+// (non-interrupt) code — create_task, reap_finished_tasks, task_exit —
+// also holds cli across the entire critical section, so this core's own
+// timer can never fire (and try to re-enter this same lock) while this
+// core already holds it. A different core spinning on this lock during
+// that window just waits — its own pending tick is not lost, merely
+// delayed until it acquires the lock or its own critical section ends.
+volatile int g_sched_lock = 0;
+
+void lock_sched() {
+    while (__atomic_exchange_n(&g_sched_lock, 1, __ATOMIC_ACQUIRE) != 0) {
+        asm volatile("pause");
+    }
+}
+
+void unlock_sched() { __atomic_store_n(&g_sched_lock, 0, __ATOMIC_RELEASE); }
+
+// For every caller running in NORMAL (non-interrupt) context with
+// interrupts possibly enabled: takes the lock with this core's own
+// interrupts held off for the duration. Without this, the core's own
+// timer tick can fire while it holds g_sched_lock, and on_timer_tick
+// then spins forever on a lock its own core holds — a self-deadlock.
+// (Only on_timer_tick itself, already inside an interrupt gate with IF
+// cleared, may use plain lock_sched.)
+uint64_t lock_sched_irqsave() {
+    uint64_t flags;
+    asm volatile("pushfq\n\tpop %0\n\tcli" : "=r"(flags)::"memory");
+    lock_sched();
+    return flags;
+}
+
+void unlock_sched_irqrestore(uint64_t flags) {
+    unlock_sched();
+    asm volatile("push %0\n\tpopfq" : : "r"(flags) : "memory", "cc");
+}
+
+// Diagnostic-only (stage 10 debugging, kept deliberately — see
+// DECISIONS.md): a task about to be resumed must have a sane, fixed
+// selector in its saved trap frame. Called only while g_sched_lock is
+// already held. If this ever fires again after the redesign to a single
+// global lock, it means the bug wasn't actually a synchronization race
+// in the scheduler at all, and points at something else entirely
+// (create_task's frame construction, the heap, or memory corruption
+// from an unrelated subsystem) — valuable information either way.
+void sanity_check_or_panic(int idx, uint32_t claiming_core, uint64_t rsp) {
+    auto* r = reinterpret_cast<registers*>(rsp);
+    if (r->cs == kKernelCodeSelector && r->ss == kKernelDataSelector) {
+        return;
+    }
+    serial::lock();
+    serial::puts("[PANIC] sched: claim sanity check failed core=");
+    serial::put_hex(claiming_core);
+    serial::puts(" idx=");
+    serial::put_hex(static_cast<uint64_t>(idx));
+    serial::puts(" rsp=");
+    serial::put_hex(rsp);
+    serial::puts(" cs=");
+    serial::put_hex(r->cs);
+    serial::puts(" ss=");
+    serial::put_hex(r->ss);
+    serial::puts(" rip=");
+    serial::put_hex(r->rip);
+    serial::puts("\r\n");
+    serial::unlock();
+    for (;;) {
+        asm volatile("cli\n\thlt");
+    }
+}
 
 [[noreturn]] void panic(const char* msg) {
     serial::lock();
@@ -77,81 +149,68 @@ alignas(16) uint8_t g_exit_scratch_stack[kMaxCores][kExitScratchStackSize];
     }
 }
 
-// The ONLY safe way for any core to start (or resume) running a Ready
-// task, whether it's "resuming its own work" or "stealing someone
-// else's" — those are just two different SEARCH ORDERS over candidate
-// slots (see on_timer_tick), not two different safety mechanisms. A real
-// bug this project hit and fixed (see DECISIONS.md, stage 10): an
-// earlier version let a core's own-queue pass claim a Ready slot via a
-// plain, non-atomic check-then-set, while only the steal pass used an
-// atomic CAS — meaning a core resuming "its own" task and a different
-// core stealing that exact same task could BOTH win, both resume the
-// same stack concurrently, and corrupt it. Every claim, regardless of
-// current ownership, goes through this one atomic compare-and-swap.
-bool try_claim(int idx, uint32_t claiming_core) {
-    uint32_t expected = kReady;
-    if (__atomic_compare_exchange_n(&g_tasks[idx].state, &expected, kRunning, false,
-                                     __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
-        g_tasks[idx].owner_core = static_cast<int32_t>(claiming_core);
+// The single source of "what should this core run next" — round-robin
+// among tasks it already owns, then (if stealing is enabled) anyone
+// else's ready work, then its own idle context. Must be called with
+// g_sched_lock already held, and updates g_current_index[core] itself.
+// Shared by on_timer_tick (after saving the just-interrupted context)
+// and task_exit (which has nothing of its own left to save).
+uint64_t pick_next_locked(uint32_t core) {
+    int cur = g_current_index[core];
+    int start = (cur < 0) ? 0 : cur;
 
-        // Diagnostic-only sanity check (stage 10 debugging): a claimed
-        // task's saved trap frame must have sane, fixed selector values.
-        // If it doesn't, something corrupted this slot's rsp/stack
-        // BEFORE we ever got to iretq — panic here, with the exact
-        // claim details, instead of downstream at a confusing #GP.
-        auto* r = reinterpret_cast<registers*>(g_tasks[idx].rsp);
-        if (r->cs != kKernelCodeSelector || r->ss != kKernelDataSelector) {
-            serial::lock();
-            serial::puts("[PANIC] sched: claim sanity check failed core=");
-            serial::put_hex(claiming_core);
-            serial::puts(" idx=");
-            serial::put_hex(static_cast<uint64_t>(idx));
-            serial::puts(" rsp=");
-            serial::put_hex(g_tasks[idx].rsp);
-            serial::puts(" cs=");
-            serial::put_hex(r->cs);
-            serial::puts(" ss=");
-            serial::put_hex(r->ss);
-            serial::puts(" rip=");
-            serial::put_hex(r->rip);
-            serial::puts("\r\n");
-            serial::unlock();
-            for (;;) {
-                asm volatile("cli\n\thlt");
+    for (int i = 1; i <= kMaxTasks; i++) {
+        int idx = (start + i) % kMaxTasks;
+        if (g_tasks[idx].owner_core == static_cast<int32_t>(core) && g_tasks[idx].state == kReady) {
+            g_tasks[idx].state = kRunning;
+            g_current_index[core] = idx;
+            uint64_t rsp = g_tasks[idx].rsp;
+            sanity_check_or_panic(idx, core, rsp);
+            return rsp;
+        }
+    }
+
+    if (g_stealing_enabled) {
+        for (int idx = 0; idx < kMaxTasks; idx++) {
+            if (g_tasks[idx].owner_core == static_cast<int32_t>(core)) {
+                continue; // already tried these, above
+            }
+            if (g_tasks[idx].state == kReady) {
+                g_tasks[idx].state = kRunning;
+                g_tasks[idx].owner_core = static_cast<int32_t>(core);
+                g_current_index[core] = idx;
+                uint64_t rsp = g_tasks[idx].rsp;
+                sanity_check_or_panic(idx, core, rsp);
+                return rsp;
             }
         }
-        return true;
     }
-    return false;
+
+    g_current_index[core] = -1;
+    return g_idle_rsp[core];
 }
 
 // Runs on whichever core is executing the task at the moment its entry
-// function returns. Never returns itself. Does NOT halt forever on the
-// task's OWN stack the way stage 5's version did (see the
-// g_exit_scratch_stack comment above for why that's unsafe here) --
-// immediately switches to this core's dedicated scratch stack, with
-// interrupts held off across the transition so no interrupt can ever be
-// taken while still on the about-to-be-abandoned stack. Once on the
-// scratch stack, parks for at most one tick so the very next timer tick
-// notices kFinished and reschedules this core onto something else.
+// function returns. Never returns itself. Hands off DIRECTLY to
+// whatever runs next (another ready/stolen task, or this core's own
+// idle context) via resume_trap_frame — no intermediate "parked" stack,
+// and no waiting for the next hardware tick. An earlier version parked
+// on a small per-core scratch stack until the next tick noticed
+// kFinished; that turned out to have a real timing window (see
+// DECISIONS.md, stage 10) — removing the intermediate step removes the
+// whole window, not just this one manifestation of it.
 [[noreturn]] static void task_exit() {
     asm volatile("cli");
 
     uint32_t core = static_cast<uint32_t>(lapic::id());
+    lock_sched();
     int idx = g_current_index[core];
     g_tasks[idx].state = kFinished;
     g_completed_by_core[core]++;
+    uint64_t next_rsp = pick_next_locked(core);
+    unlock_sched();
 
-    uint64_t scratch_top =
-        reinterpret_cast<uint64_t>(&g_exit_scratch_stack[core][kExitScratchStackSize]);
-    asm volatile("mov %0, %%rsp\n\t"
-                 "1: sti\n\t"
-                 "hlt\n\t"
-                 "jmp 1b\n\t"
-                 :
-                 : "r"(scratch_top)
-                 : "memory");
-    __builtin_unreachable();
+    resume_trap_frame(next_rsp);
 }
 
 } // namespace
@@ -161,19 +220,16 @@ void register_this_core_idle() {
     if (core >= kMaxCores) {
         panic("register_this_core_idle: APIC id exceeds kMaxCores");
     }
+    uint64_t flags = lock_sched_irqsave();
     g_current_index[core] = -1;
     g_completed_by_core[core] = 0;
+    unlock_sched_irqrestore(flags);
 }
 
 int reap_finished_tasks() {
-    // BSP-only, but must still be atomic w.r.t. this core's OWN
-    // scheduler: without this, the BSP's own timer tick could preempt it
-    // mid-sweep to go run some ready task, and (worse) create_task below
-    // relies on calling this safely from inside its own critical
-    // section. See create_task's comment for the concrete bug this
-    // guards against.
     uint64_t saved_flags;
     asm volatile("pushfq\n\tpop %0\n\tcli" : "=r"(saved_flags)::"memory");
+    lock_sched();
 
     int freed = 0;
     for (int i = 0; i < g_task_count; i++) {
@@ -185,23 +241,15 @@ int reap_finished_tasks() {
         }
     }
 
+    unlock_sched();
     asm volatile("push %0\n\tpopfq" : : "r"(saved_flags) : "memory", "cc");
     return freed;
 }
 
-// Must run with interrupts held off for its full duration, not just
-// around individual field writes: a real, reproduced bug (see
-// DECISIONS.md, stage 10) came from this exact function running on the
-// BSP with interrupts enabled — the BSP's own timer tick could fire
-// mid-call and switch the BSP away to go run one of its OWN
-// already-created, already-ready tasks (pass 1 isn't gated by
-// set_stealing_enabled — only pass 2, stealing FROM OTHER cores, is),
-// resuming create_task later mid-construction of a DIFFERENT task's fake
-// frame. Nothing here is safe to interleave with the scheduler picking
-// this same core's own newly-created work back up.
 int create_task(void (*entry)(), const char* name) {
     uint64_t saved_flags;
     asm volatile("pushfq\n\tpop %0\n\tcli" : "=r"(saved_flags)::"memory");
+    lock_sched();
 
     int id = -1;
     for (int i = 0; i < g_task_count; i++) {
@@ -219,8 +267,7 @@ int create_task(void (*entry)(), const char* name) {
 
     if (g_tasks[id].state == kFinished && g_tasks[id].stack != nullptr) {
         // Reusing a finished task's slot: safe here specifically because
-        // create_task only ever runs on the BSP, and a finished task is
-        // never resumed or touched by anyone again once kFinished.
+        // a finished task is never resumed or touched by anyone again.
         heap::kfree(g_tasks[id].stack);
         g_tasks[id].stack = nullptr;
     }
@@ -228,9 +275,18 @@ int create_task(void (*entry)(), const char* name) {
     auto* stack = static_cast<uint8_t*>(heap::kmalloc(kStackSize));
     if (stack == nullptr) {
         // Graceful degradation, not an immediate panic: reclaim whatever
-        // finished tasks project-wide haven't been cleaned up yet, and
-        // try exactly once more. See DECISIONS.md, stage 10.
-        reap_finished_tasks();
+        // finished tasks project-wide haven't been cleaned up yet
+        // (safe to call while already holding the lock — reap_finished_
+        // tasks acquires it too, but this is the one legitimate nested
+        // acquisition in this file, so lock_sched must be re-entrant...
+        // it isn't, so inline the sweep here directly instead).
+        for (int i = 0; i < g_task_count; i++) {
+            if (g_tasks[i].state == kFinished && g_tasks[i].stack != nullptr) {
+                heap::kfree(g_tasks[i].stack);
+                g_tasks[i].stack = nullptr;
+                g_tasks[i].state = kFree;
+            }
+        }
         stack = static_cast<uint8_t*>(heap::kmalloc(kStackSize));
     }
     if (stack == nullptr) {
@@ -258,6 +314,7 @@ int create_task(void (*entry)(), const char* name) {
         .state = kReady,
     };
 
+    unlock_sched();
     asm volatile("push %0\n\tpopfq" : : "r"(saved_flags) : "memory", "cc");
     return id;
 }
@@ -266,8 +323,11 @@ void set_stealing_enabled(bool enabled) { g_stealing_enabled = enabled; }
 
 uint64_t on_timer_tick(uint64_t current_rsp) {
     uint32_t core = static_cast<uint32_t>(lapic::id());
-    int cur = g_current_index[core];
 
+    lock_sched();
+    g_tick_count[core]++;
+
+    int cur = g_current_index[core];
     if (cur < 0) {
         g_idle_rsp[core] = current_rsp;
     } else if (g_tasks[cur].state == kRunning) {
@@ -279,48 +339,13 @@ uint64_t on_timer_tick(uint64_t current_rsp) {
         g_tasks[cur].state = kReady;
     }
 
-    // Pass 1: round-robin among tasks this core already owns, PREFERRING
-    // its own work over someone else's -- but the actual claim still
-    // goes through try_claim's atomic CAS, exactly like a steal, because
-    // "I own this" is only ever a scheduling preference here, never a
-    // safety guarantee by itself (see try_claim's comment for the real
-    // bug that taught us this).
-    int start = (cur < 0) ? 0 : cur;
-    for (int i = 1; i <= kMaxTasks; i++) {
-        int idx = (start + i) % kMaxTasks;
-        if (g_tasks[idx].owner_core == static_cast<int32_t>(core) &&
-            g_tasks[idx].state == kReady && try_claim(idx, core)) {
-            g_current_index[core] = idx;
-            return g_tasks[idx].rsp;
-        }
-    }
-
-    // Pass 2: nothing of our own claimed -- try to steal exactly one
-    // ready task from anyone else. Lock-free: a single atomic
-    // compare-and-swap per candidate, no spinlock, no blocking. If we
-    // lose a race (another core claimed it first), we just move on to
-    // the next candidate rather than retrying the same one. See
-    // DECISIONS.md for why this is "lock-free" in the literal sense but
-    // not a full wait-free deque.
-    if (g_stealing_enabled) {
-        for (int idx = 0; idx < kMaxTasks; idx++) {
-            if (g_tasks[idx].owner_core == static_cast<int32_t>(core)) {
-                continue; // already tried these, in pass 1
-            }
-            if (g_tasks[idx].state == kReady && try_claim(idx, core)) {
-                g_current_index[core] = idx;
-                return g_tasks[idx].rsp;
-            }
-        }
-    }
-
-    // Nothing owned, nothing stealable -- park in this core's own idle
-    // context until the next tick.
-    g_current_index[core] = -1;
-    return g_idle_rsp[core];
+    uint64_t rsp = pick_next_locked(core);
+    unlock_sched();
+    return rsp;
 }
 
 void debug_dump_tasks() {
+    uint64_t flags = lock_sched_irqsave();
     serial::lock();
     serial::puts("[DEBUG] task dump, g_task_count=");
     serial::put_hex(static_cast<uint64_t>(g_task_count));
@@ -337,24 +362,41 @@ void debug_dump_tasks() {
         serial::puts("\r\n");
     }
     serial::unlock();
+    unlock_sched_irqrestore(flags);
 }
 
 int tasks_finished() {
+    uint64_t flags = lock_sched_irqsave();
     int total = 0;
     for (int i = 0; i < kMaxCores; i++) {
         total += g_completed_by_core[i];
     }
+    unlock_sched_irqrestore(flags);
     return total;
+}
+
+uint64_t tick_count(uint32_t core_id) {
+    if (core_id >= kMaxCores) {
+        return 0;
+    }
+    uint64_t flags = lock_sched_irqsave();
+    uint64_t n = g_tick_count[core_id];
+    unlock_sched_irqrestore(flags);
+    return n;
 }
 
 int completed_task_count(uint32_t core_id) {
     if (core_id >= kMaxCores) {
         return 0;
     }
-    return g_completed_by_core[core_id];
+    uint64_t flags = lock_sched_irqsave();
+    int n = g_completed_by_core[core_id];
+    unlock_sched_irqrestore(flags);
+    return n;
 }
 
 int owned_task_count(uint32_t core_id) {
+    uint64_t flags = lock_sched_irqsave();
     int count = 0;
     for (int i = 0; i < g_task_count; i++) {
         if (g_tasks[i].owner_core == static_cast<int32_t>(core_id) &&
@@ -362,13 +404,20 @@ int owned_task_count(uint32_t core_id) {
             count++;
         }
     }
+    unlock_sched_irqrestore(flags);
     return count;
 }
 
 void for_each_task(void (*callback)(int id, const char* name, bool active)) {
-    for (int i = 0; i < g_task_count; i++) {
+    uint64_t flags = lock_sched_irqsave();
+    int count = g_task_count;
+    unlock_sched_irqrestore(flags);
+    for (int i = 0; i < count; i++) {
+        flags = lock_sched_irqsave();
         bool active = g_tasks[i].state == kReady || g_tasks[i].state == kRunning;
-        callback(i, g_tasks[i].name, active);
+        const char* name = g_tasks[i].name;
+        unlock_sched_irqrestore(flags);
+        callback(i, name, active);
     }
 }
 

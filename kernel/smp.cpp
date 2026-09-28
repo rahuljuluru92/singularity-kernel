@@ -168,7 +168,7 @@ extern "C" [[noreturn]] void ap_entry() {
     // strictly sequential (see bring_up_all_aps above): no other AP is
     // ever mid-calibration (reading the same PIT) at the same time.
     constexpr std::uint8_t kTimerVector = 32;
-    lapic::calibrate_and_arm_timer(100, kTimerVector);
+    std::uint32_t ap_hz = lapic::calibrate_and_arm_timer(100, kTimerVector);
 
     sched::register_this_core_idle();
 
@@ -178,6 +178,9 @@ extern "C" [[noreturn]] void ap_entry() {
     serial::puts("[OK] cpu ");
     serial::put_hex(id);
     serial::puts(" up\r\n");
+    serial::puts("[OK] cpu timer hz=");
+    serial::put_hex(ap_hz);
+    serial::puts("\r\n");
     serial::unlock();
 
     // This core now genuinely participates in scheduling: its own timer

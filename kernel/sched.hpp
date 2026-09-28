@@ -70,7 +70,11 @@ int owned_task_count(uint32_t core_id);
 // work — the "after" half of stage 10's per-core task-count proof.
 int completed_task_count(uint32_t core_id);
 
-// TEMP DIAGNOSTIC (stage 10 debugging): prints every task slot's owner,
+// How many timer ticks the given core has taken through on_timer_tick
+// (diagnostic: distinguishes "never stole anything" from "never ticked").
+uint64_t tick_count(uint32_t core_id);
+
+// Diagnostic (kept deliberately, stage 10): prints every task slot's owner,
 // state, and rsp.
 void debug_dump_tasks();
 

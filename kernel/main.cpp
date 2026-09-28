@@ -174,7 +174,7 @@ void spin() {
 }
 
 volatile int g_smp_demo_counter = 0;
-volatile int g_smp_demo_started = 0; // TEMP DIAGNOSTIC
+volatile int g_smp_demo_started = 0; // diagnostic: bodies that began running
 
 // Short-lived on purpose: a small amount of busy work, one atomic
 // increment of a shared counter, then returns (task_exit via the
@@ -186,7 +186,7 @@ volatile int g_smp_demo_started = 0; // TEMP DIAGNOSTIC
 // read-modify-write to the same cache line. `lock incl` is a real
 // cross-core interlocked operation.
 void smp_demo_task() {
-    asm volatile("lock incl %0" : "+m"(g_smp_demo_started)); // TEMP DIAGNOSTIC
+    asm volatile("lock incl %0" : "+m"(g_smp_demo_started)); 
     spin();
     asm volatile("lock incl %0" : "+m"(g_smp_demo_counter));
 }
@@ -220,7 +220,6 @@ void smp_scheduler_demo() {
     for (int i = 0; i < kTaskCount; i++) {
         sched::create_task(smp_demo_task, "smp-demo");
     }
-    asm volatile("sti");
 
     serial::puts("[OK] smp before:");
     for (int core = 0; core < core_count; core++) {
@@ -231,7 +230,18 @@ void smp_scheduler_demo() {
     }
     serial::puts("\r\n");
 
+    // Stealing must be switched on, and interrupts re-enabled, in THIS
+    // order, with the BSP's interrupts still off across both: re-enabling
+    // interrupts first (as an earlier version of this function did) opens
+    // a window — including the slow serial "before" print above — in
+    // which the BSP's own timer tick can switch it into its own newly
+    // created tasks, chaining through all of them before kernel_main is
+    // ever resumed to enable stealing at all. Found by a ~3%-of-runs
+    // "no work migrated" failure where every core ticked normally but
+    // the other cores never had anything stealable enabled. See
+    // DECISIONS.md, stage 10.
     sched::set_stealing_enabled(true);
+    asm volatile("sti");
 
     while (sched::tasks_finished() < start + kTaskCount) {
         asm volatile("hlt");
@@ -264,6 +274,12 @@ void smp_scheduler_demo() {
     serial::puts("\r\n");
 
     if (cores_with_completions < 2) {
+        serial::puts("[DEBUG] ticks per core:");
+        for (int core = 0; core < core_count; core++) {
+            serial::puts(" ");
+            serial::put_hex(sched::tick_count(static_cast<uint32_t>(core)));
+        }
+        serial::puts("\r\n");
         panic("smp scheduler: no work migrated off the BSP onto any other core");
     }
     serial::puts("[OK] smp scheduler demo\r\n");

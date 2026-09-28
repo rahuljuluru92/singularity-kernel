@@ -94,7 +94,25 @@ void enable() {
     write_msr(kMsrSvr, kSvrApicSoftwareEnable | kSpuriousVector);
 }
 
-std::uint32_t id() { return static_cast<std::uint32_t>(read_msr(kMsrId)); }
+std::uint32_t id() {
+    std::uint64_t raw = read_msr(kMsrId);
+    std::uint32_t value = static_cast<std::uint32_t>(raw);
+    // Sanity bound (kept deliberately after stage 10 debugging): this project never
+    // configures more than a handful of cores. A value outside a very
+    // generous bound almost certainly means the MSR read itself didn't
+    // land where expected, not a real 64+-core machine.
+    if (value >= 64 || (raw >> 32) != 0) {
+        serial::lock();
+        serial::puts("[PANIC] lapic: id() read implausible value raw=");
+        serial::put_hex(raw);
+        serial::puts("\r\n");
+        serial::unlock();
+        for (;;) {
+            asm volatile("cli\n\thlt");
+        }
+    }
+    return value;
+}
 
 void send_init_sipi_sipi(std::uint32_t target_apic_id, std::uint8_t vector) {
     std::uint64_t dest = static_cast<std::uint64_t>(target_apic_id) << 32;
