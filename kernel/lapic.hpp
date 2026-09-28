@@ -35,9 +35,21 @@ std::uint32_t id();
 void send_init_sipi_sipi(std::uint32_t target_apic_id, std::uint8_t vector);
 
 // Must be called at the end of any interrupt handler this core takes
-// through the LAPIC (not used by anything yet in stage 9 — the PIT/PIC
-// path stage 5 built is untouched — but every x2APIC-enabled core needs
-// this available before it can safely take one later).
+// through the LAPIC.
 void eoi();
+
+// Calibrates THIS core's LAPIC timer against the PIT reference clock
+// (pit::start_reference_clock() must already be running — see
+// kernel/pit.hpp) and arms it in periodic mode at approximately
+// `frequency_hz`, targeting IDT vector `vector`. Every core's LAPIC
+// timer is independent hardware — this must be called once per core
+// (BSP and every AP), never shared. Leaves the timer genuinely counting
+// and unmasked; whether it actually delivers an interrupt is controlled
+// purely by that core's own EFLAGS.IF (sti/cli), not by this function.
+// Returns the measured timer frequency in Hz (for logging/verification —
+// an honest measured value, not the requested one) — see DECISIONS.md,
+// stage 10, for why calibration is necessary at all (there's no
+// documented fixed LAPIC timer frequency to assume).
+std::uint32_t calibrate_and_arm_timer(std::uint32_t frequency_hz, std::uint8_t vector);
 
 } // namespace lapic

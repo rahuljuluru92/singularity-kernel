@@ -8,6 +8,7 @@
 #include "lapic.hpp"
 #include "paging.hpp"
 #include "pmm.hpp"
+#include "sched.hpp"
 #include "serial.hpp"
 
 #include <cstddef>
@@ -136,9 +137,11 @@ void bring_up_all_aps() {
         g_cpus[slot].up = true;
     }
 
+    serial::lock();
     serial::puts("[OK] smp cpus_up=");
     serial::put_hex(static_cast<std::uint64_t>(g_cpus_up));
     serial::puts("\r\n");
+    serial::unlock();
 }
 
 extern "C" [[noreturn]] void ap_entry() {
@@ -147,25 +150,46 @@ extern "C" [[noreturn]] void ap_entry() {
     // kernel/idt.cpp. Calling the exact same init() the BSP used, rather
     // than a separate "AP variant," means there's only one place either
     // is ever defined.
+    // gdt::init() is safe to call redundantly per-core: kGdt is a
+    // compile-time constant, never mutated, so every core just does its
+    // own independent lgdt against the same immutable content. The IDT
+    // is NOT: idt::init() rewrites a shared, mutable table, which is
+    // unsafe once any earlier AP is already ticking (a real, reproduced
+    // bug — see DECISIONS.md, stage 10) — every AP calls idt::load()
+    // instead, which only loads the table the BSP already built once.
     gdt::init();
-    idt::init();
+    idt::load();
     // IA32_APIC_BASE and the Spurious Interrupt Vector Register are
     // per-core MSRs — every core must enable its own x2APIC.
     lapic::enable();
 
+    // Every core calibrates its OWN LAPIC timer against the shared PIT
+    // reference clock — safe here specifically because AP bring-up is
+    // strictly sequential (see bring_up_all_aps above): no other AP is
+    // ever mid-calibration (reading the same PIT) at the same time.
+    constexpr std::uint8_t kTimerVector = 32;
+    std::uint32_t ap_hz = lapic::calibrate_and_arm_timer(100, kTimerVector);
+
+    sched::register_this_core_idle();
+
     std::uint32_t id = lapic::id();
     asm volatile("lock incl %0" : "+m"(g_cpus_up));
+    serial::lock();
     serial::puts("[OK] cpu ");
     serial::put_hex(id);
     serial::puts(" up\r\n");
+    serial::puts("[OK] cpu timer hz=");
+    serial::put_hex(ap_hz);
+    serial::puts("\r\n");
+    serial::unlock();
 
-    // No per-core scheduling exists yet (stage 10) — idle forever with
-    // interrupts masked, exactly like kernel/sched.cpp's task_exit()
-    // idles a finished task, but never enabling interrupts at all: an
-    // unhandled hardware IRQ landing on a core with no scheduler to
-    // route it to would be a bug with no good outcome yet.
+    // This core now genuinely participates in scheduling: its own timer
+    // will fire, and sched::on_timer_tick will look for owned or
+    // stealable work every tick. Idling here just means "nothing to do
+    // yet, or right now" — not "parked forever" the way stage 9 left it.
+    asm volatile("sti");
     for (;;) {
-        asm volatile("cli\n\thlt");
+        asm volatile("hlt");
     }
 }
 

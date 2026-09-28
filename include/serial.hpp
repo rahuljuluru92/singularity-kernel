@@ -41,6 +41,25 @@ inline unsigned int inl(unsigned short port) {
 
 constexpr unsigned short kCom1 = 0x3F8;
 
+// A whole-message spinlock (NOT per-byte) — deliberately coarse. Its
+// only job is letting a multi-call diagnostic sequence (several
+// puts()/put_hex() calls building one panic line) print as one
+// contiguous, human-readable line even if another core panics at nearly
+// the same moment, instead of interleaving byte-for-byte into an
+// unreadable mess — a real problem hit while debugging stage 9/10's SMP
+// work, where two genuinely concurrent panics were impossible to read
+// apart. Callers bracket a WHOLE sequence of puts/put_hex calls with
+// lock()/unlock(), not each individual call.
+inline volatile int g_lock = 0;
+
+inline void lock() {
+    while (__atomic_exchange_n(&g_lock, 1, __ATOMIC_ACQUIRE) != 0) {
+        asm volatile("pause");
+    }
+}
+
+inline void unlock() { __atomic_store_n(&g_lock, 0, __ATOMIC_RELEASE); }
+
 // 8N1, no FIFO tricks — just enough to get bytes onto the wire for
 // QEMU's -serial to capture. Must run before any putc/puts call.
 inline void init() {
