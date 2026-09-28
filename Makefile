@@ -80,7 +80,7 @@ $(BUILD)/pit.o: kernel/pit.cpp kernel/pit.hpp include/serial.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD)/sched.o: kernel/sched.cpp kernel/sched.hpp kernel/heap.hpp kernel/isr.hpp
+$(BUILD)/sched.o: kernel/sched.cpp kernel/sched.hpp kernel/heap.hpp kernel/isr.hpp kernel/lapic.hpp include/serial.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
@@ -116,7 +116,7 @@ $(BUILD)/ioapic.o: kernel/ioapic.cpp kernel/ioapic.hpp kernel/acpi.hpp kernel/pa
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD)/smp.o: kernel/smp.cpp kernel/smp.hpp kernel/acpi.hpp pmm/bitmap_allocator.hpp kernel/gdt.hpp kernel/heap.hpp kernel/idt.hpp kernel/lapic.hpp kernel/paging.hpp kernel/pmm.hpp include/serial.hpp
+$(BUILD)/smp.o: kernel/smp.cpp kernel/smp.hpp kernel/acpi.hpp pmm/bitmap_allocator.hpp kernel/gdt.hpp kernel/heap.hpp kernel/idt.hpp kernel/lapic.hpp kernel/paging.hpp kernel/pmm.hpp kernel/sched.hpp include/serial.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 

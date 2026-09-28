@@ -48,13 +48,27 @@ extern "C" uint64_t isr_handler(registers* regs) {
         return reinterpret_cast<uint64_t>(regs);
     }
 
-    serial::puts("[PANIC] unexpected exception vector=");
+    constexpr uint64_t kPageFaultVector = 14;
+    uint64_t cr2 = 0;
+    if (regs->vector == kPageFaultVector) {
+        asm volatile("mov %%cr2, %0" : "=r"(cr2));
+    }
+
+    serial::lock();
+    serial::puts("[PANIC] core=");
+    serial::put_hex(lapic::id());
+    serial::puts(" unexpected exception vector=");
     serial::put_hex(regs->vector);
     serial::puts(" error_code=");
     serial::put_hex(regs->error_code);
     serial::puts(" rip=");
     serial::put_hex(regs->rip);
+    if (regs->vector == kPageFaultVector) {
+        serial::puts(" cr2=");
+        serial::put_hex(cr2);
+    }
     serial::puts("\r\n");
+    serial::unlock();
 
     for (;;) {
         asm volatile("cli\n\thlt");

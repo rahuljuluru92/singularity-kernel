@@ -32,9 +32,11 @@ struct Xorshift32 {
 };
 
 [[noreturn]] void panic(const char* msg) {
+    serial::lock();
     serial::puts("[PANIC] ");
     serial::puts(msg);
     serial::puts("\r\n");
+    serial::unlock();
     for (;;) {
         asm volatile("cli\n\thlt");
     }
@@ -171,65 +173,158 @@ void spin() {
     }
 }
 
-void demo_task(char name) {
-    for (int i = 1; i <= 5; i++) {
-        serial::puts("[TASK ");
-        serial::putc(name);
-        serial::puts("] iteration ");
-        serial::putc(static_cast<char>('0' + i));
-        serial::puts("\r\n");
-        spin();
-    }
-}
-
-void task_a() { demo_task('A'); }
-void task_b() { demo_task('B'); }
-void task_c() { demo_task('C'); }
-
-volatile int g_torture_counter = 0;
+volatile int g_smp_demo_counter = 0;
+volatile int g_smp_demo_started = 0; // TEMP DIAGNOSTIC
 
 // Short-lived on purpose: a small amount of busy work, one atomic
 // increment of a shared counter, then returns (task_exit via the
-// sched.cpp trampoline). A plain `g_torture_counter++` would compile to
-// a separate load/increment/store — not safe against being preempted
-// mid-sequence by another task incrementing the same counter, even on
-// one core. A single `incl` instruction on the memory operand can't be
-// interrupted mid-instruction, so it needs no lock prefix here (that's
-// for multi-core cache coherency, not relevant to this project's scope).
-void torture_task() {
-    for (volatile int i = 0; i < 50000; i = i + 1) {
-    }
-    asm volatile("incl %0" : "+m"(g_torture_counter));
+// sched.cpp trampoline). Unlike stage 5's single-core version of this
+// same idea, `lock` genuinely matters here now: this counter is
+// incremented by whichever core happens to be running this task at the
+// time, and a plain (unlocked) `incl` only guarantees atomicity against
+// same-core preemption, not against a DIFFERENT core's concurrent
+// read-modify-write to the same cache line. `lock incl` is a real
+// cross-core interlocked operation.
+void smp_demo_task() {
+    asm volatile("lock incl %0" : "+m"(g_smp_demo_started)); // TEMP DIAGNOSTIC
+    spin();
+    asm volatile("lock incl %0" : "+m"(g_smp_demo_counter));
 }
 
-void scheduler_interleaving_demo() {
-    sched::create_task(task_a, "A");
-    sched::create_task(task_b, "B");
-    sched::create_task(task_c, "C");
-
-    int target = sched::tasks_finished() + 3;
-    while (sched::tasks_finished() < target) {
-        asm volatile("hlt");
-    }
-    serial::puts("[OK] scheduler interleaving\r\n");
-}
-
-void scheduler_torture_test() {
-    constexpr int kTortureTasks = 50;
-    g_torture_counter = 0;
+// Stage 10's actual success criterion, in one function: creates a
+// deliberately imbalanced load (every task initially owned by the BSP),
+// snapshots per-core ownership before any stealing is allowed, then lets
+// idle cores actually redistribute the work and snapshots per-core
+// COMPLETION counts afterward — panicking (not just printing and hoping
+// a human notices) if the "after" picture doesn't show real migration,
+// or if the shared counter doesn't land on exactly the expected total
+// despite genuinely concurrent, cross-core execution.
+void smp_scheduler_demo() {
+    constexpr int kTaskCount = 40;
+    int core_count = static_cast<int>(acpi::madt().lapic_count);
+    g_smp_demo_counter = 0;
 
     int start = sched::tasks_finished();
-    for (int i = 0; i < kTortureTasks; i++) {
-        sched::create_task(torture_task, "torture");
+    // The whole batch, not just each individual create_task call, must
+    // run with the BSP's own interrupts held off: create_task's own
+    // internal critical section only stops the BSP from being preempted
+    // MID-CALL, but with the BSP's timer left enabled BETWEEN calls, a
+    // real bug (see DECISIONS.md, stage 10) let the BSP's own pass-1 run
+    // an already-created task to completion partway through this exact
+    // loop, making create_task's LATER calls reuse that slot's stack
+    // while stealing was already quietly happening in the gaps — never
+    // the clean, fully-imbalanced starting point this demo means to
+    // create. Holding cli for the whole batch guarantees all kTaskCount
+    // tasks exist, fresh, untouched, before anything can run any of them.
+    asm volatile("cli");
+    for (int i = 0; i < kTaskCount; i++) {
+        sched::create_task(smp_demo_task, "smp-demo");
     }
-    while (sched::tasks_finished() < start + kTortureTasks) {
+    asm volatile("sti");
+
+    serial::puts("[OK] smp before:");
+    for (int core = 0; core < core_count; core++) {
+        serial::puts(" core");
+        serial::put_hex(static_cast<uint64_t>(core));
+        serial::puts("=");
+        serial::put_hex(static_cast<uint64_t>(sched::owned_task_count(static_cast<uint32_t>(core))));
+    }
+    serial::puts("\r\n");
+
+    sched::set_stealing_enabled(true);
+
+    while (sched::tasks_finished() < start + kTaskCount) {
         asm volatile("hlt");
     }
 
-    if (g_torture_counter != kTortureTasks) {
-        panic("scheduler torture: counter mismatch — lost or duplicated a task");
+    if (g_smp_demo_counter != kTaskCount) {
+        serial::puts("[DEBUG] started=");
+        serial::put_hex(static_cast<uint64_t>(g_smp_demo_started));
+        serial::puts(" counter=");
+        serial::put_hex(static_cast<uint64_t>(g_smp_demo_counter));
+        serial::puts(" expected=");
+        serial::put_hex(static_cast<uint64_t>(kTaskCount));
+        serial::puts("\r\n");
+        sched::debug_dump_tasks();
+        panic("smp scheduler: counter mismatch — lost or duplicated a task across cores");
     }
-    serial::puts("[OK] scheduler torture\r\n");
+
+    serial::puts("[OK] smp after:");
+    int cores_with_completions = 0;
+    for (int core = 0; core < core_count; core++) {
+        int completed = sched::completed_task_count(static_cast<uint32_t>(core));
+        if (completed > 0) {
+            cores_with_completions++;
+        }
+        serial::puts(" core");
+        serial::put_hex(static_cast<uint64_t>(core));
+        serial::puts("=");
+        serial::put_hex(static_cast<uint64_t>(completed));
+    }
+    serial::puts("\r\n");
+
+    if (cores_with_completions < 2) {
+        panic("smp scheduler: no work migrated off the BSP onto any other core");
+    }
+    serial::puts("[OK] smp scheduler demo\r\n");
+}
+
+// Directly exhausts the heap (bypassing the task abstraction, for full
+// control), confirms kmalloc genuinely fails, then proves
+// sched::reap_finished_tasks() is what turns that failure into success:
+// a batch of short-lived tasks is created and run to completion first
+// (their stacks deliberately left unreclaimed — nothing has called
+// create_task again to trigger the ordinary per-slot reuse path), then a
+// single large allocation is sized (from a live heap::free_bytes()
+// reading, not a hardcoded guess) to require reclaiming that leftover
+// space. Confirms the exact same allocation fails before reaping and
+// succeeds after, using the real numbers rather than an assumption.
+void oom_reaper_test() {
+    // Clear out anything already finished-but-unreclaimed from earlier
+    // in the boot sequence (smp_scheduler_demo's 40 tasks, in
+    // particular) first, so the counts below are cleanly attributable
+    // to just this test's own batch, not a mix of old and new garbage.
+    sched::reap_finished_tasks();
+
+    constexpr int kGarbageTasks = 20;
+    int start = sched::tasks_finished();
+    // See smp_scheduler_demo's identical comment: the whole batch must
+    // be created with the BSP's own interrupts held off, not just each
+    // individual create_task call.
+    asm volatile("cli");
+    for (int i = 0; i < kGarbageTasks; i++) {
+        sched::create_task(smp_demo_task, "oom-garbage");
+    }
+    asm volatile("sti");
+    while (sched::tasks_finished() < start + kGarbageTasks) {
+        asm volatile("hlt");
+    }
+    // Every one of those kGarbageTasks slots is now kFinished, holding a
+    // 16 KiB stack apiece, entirely unreclaimed — nothing has called
+    // create_task since, so the ordinary per-call reuse path never ran.
+
+    std::size_t free_before = heap::free_bytes();
+    std::size_t oversized_request = free_before + 32768; // more than is currently free, on purpose
+
+    void* should_fail = heap::kmalloc(oversized_request);
+    if (should_fail != nullptr) {
+        panic("oom reaper test: allocation unexpectedly succeeded before reaping");
+    }
+
+    int reaped = sched::reap_finished_tasks();
+    if (reaped != kGarbageTasks) {
+        panic("oom reaper test: reaped count didn't match the garbage batch exactly");
+    }
+
+    void* should_succeed = heap::kmalloc(oversized_request);
+    if (should_succeed == nullptr) {
+        panic("oom reaper test: the same allocation still failed after reaping");
+    }
+    heap::kfree(should_succeed);
+
+    serial::puts("[OK] oom reaper reaped=");
+    serial::put_hex(static_cast<uint64_t>(reaped));
+    serial::puts("\r\n");
 }
 
 constexpr const char* kTestFileName = "HELLO.TXT";
@@ -364,25 +459,29 @@ extern "C" void kernel_main(efi::Handle image_handle, efi::SystemTable* system_t
     serial::puts("\r\n");
     heap_torture_test();
 
-    // Every other enabled core the MADT reported, brought up and running
-    // independently — the actual proof, not just "detected." No
-    // scheduler routes work to them yet (stage 10); each parks idle,
-    // interrupts masked, right after printing its own id.
+    pic::init(); // remap + mask everything; see DECISIONS.md, stage 10
+    sched::register_this_core_idle();
+
+    // Every other enabled core the MADT reported, brought up AND now
+    // genuinely participating in scheduling (each AP calibrates its own
+    // LAPIC timer, registers its own idle context, and calls sti as the
+    // last thing ap_entry does) — the actual proof of a real per-core
+    // dispatcher, not just cores that exist and print an id. See
+    // DECISIONS.md, stage 10 (this replaces stage 9's "parks forever,
+    // interrupts masked" ending).
     smp::bring_up_all_aps();
 
-    pic::init(); // remap + mask everything; see DECISIONS.md, stage 10
-    sched::init();
+    asm volatile("sti"); // BSP's own first-ever interrupts-enabled moment
 
-    asm volatile("sti"); // first time this project has ever enabled interrupts
-
-    scheduler_interleaving_demo();
-    scheduler_torture_test();
+    smp_scheduler_demo();
 
     virtio_blk::init(); // prints [OK] virtio-blk queue_size=...
     fat32::init();       // prints [OK] fat32 bytes_per_sector=...
 
     disk_io_test();
     disk_io_torture_test();
+
+    oom_reaper_test();
 
     shell::run(); // never returns
 }

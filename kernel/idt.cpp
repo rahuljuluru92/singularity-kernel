@@ -43,16 +43,19 @@ void set_gate(int vector, uint64_t handler) {
 
 namespace idt {
 
-void init() {
-    for (int i = 0; i < kInstalledVectors; i++) {
-        set_gate(i, reinterpret_cast<uint64_t>(isr_stub_table[i]));
-    }
-
+void load() {
     idtr ptr{
         .limit = sizeof(table) - 1,
         .base = reinterpret_cast<uint64_t>(&table),
     };
     asm volatile("lidt %0" : : "m"(ptr));
+}
+
+void init() {
+    for (int i = 0; i < kInstalledVectors; i++) {
+        set_gate(i, reinterpret_cast<uint64_t>(isr_stub_table[i]));
+    }
+    load();
 }
 
 } // namespace idt
