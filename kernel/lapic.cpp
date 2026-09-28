@@ -1,5 +1,6 @@
 #include "lapic.hpp"
 
+#include "pit.hpp"
 #include "serial.hpp"
 
 namespace lapic {
@@ -45,6 +46,14 @@ constexpr std::uint32_t kMsrId = 0x802;
 constexpr std::uint32_t kMsrSvr = 0x80F;
 constexpr std::uint32_t kMsrEoi = 0x80B;
 constexpr std::uint32_t kMsrIcr = 0x830;
+constexpr std::uint32_t kMsrLvtTimer = 0x832;
+constexpr std::uint32_t kMsrTimerInitialCount = 0x838;
+constexpr std::uint32_t kMsrTimerCurrentCount = 0x839;
+constexpr std::uint32_t kMsrTimerDivideConfig = 0x83E;
+
+constexpr std::uint64_t kTimerDivideBy16 = 0x3;
+constexpr std::uint64_t kLvtTimerMasked = 1ULL << 16;
+constexpr std::uint64_t kLvtTimerPeriodic = 1ULL << 17;
 
 constexpr std::uint64_t kSvrApicSoftwareEnable = 1ULL << 8;
 constexpr std::uint8_t kSpuriousVector = 0xFF; // conventional choice; unused until an IOAPIC
@@ -101,5 +110,59 @@ void send_init_sipi_sipi(std::uint32_t target_apic_id, std::uint8_t vector) {
 }
 
 void eoi() { write_msr(kMsrEoi, 0); }
+
+std::uint32_t calibrate_and_arm_timer(std::uint32_t frequency_hz, std::uint8_t vector) {
+    write_msr(kMsrTimerDivideConfig, kTimerDivideBy16);
+
+    // One-shot, masked (so no interrupt is actually delivered from this
+    // measurement run), counting down from the maximum possible value —
+    // whatever's left when the PIT-measured window ends tells us how
+    // fast this core's timer actually ticks.
+    write_msr(kMsrLvtTimer, kLvtTimerMasked | vector);
+    write_msr(kMsrTimerInitialCount, 0xFFFFFFFFULL);
+
+    // Wait for a fixed, known slice of real time — 10 ms — measured
+    // against the PIT's exact, documented clock rate, not assumed.
+    // pit::read_counter() counts DOWN from 0xFFFF and wraps; a plain
+    // modular difference correctly handles the single wrap this ~10 ms
+    // window (well under the PIT's ~54.9 ms full-period at max reload)
+    // could ever cross.
+    constexpr std::uint32_t kCalibrationMillis = 10;
+    std::uint32_t target_pit_ticks = (pit::kBaseFrequencyHz / 1000) * kCalibrationMillis;
+
+    std::uint16_t pit_start = pit::read_counter();
+    std::uint32_t elapsed_pit_ticks = 0;
+    std::uint32_t spins = 0;
+    constexpr std::uint32_t kCalibrationSpinLimit = 100'000'000;
+    while (elapsed_pit_ticks < target_pit_ticks) {
+        std::uint16_t pit_now = pit::read_counter();
+        elapsed_pit_ticks = (static_cast<std::uint32_t>(pit_start) -
+                              static_cast<std::uint32_t>(pit_now)) &
+                             0xFFFFu;
+        spins++;
+        if (spins > kCalibrationSpinLimit) {
+            panic("LAPIC timer calibration: PIT reference clock never advanced");
+        }
+    }
+
+    std::uint32_t remaining = static_cast<std::uint32_t>(read_msr(kMsrTimerCurrentCount));
+    std::uint32_t elapsed_lapic_ticks = 0xFFFFFFFFu - remaining;
+    if (elapsed_lapic_ticks == 0) {
+        panic("LAPIC timer calibration: timer did not advance during the measurement window");
+    }
+
+    std::uint32_t measured_frequency_hz = elapsed_lapic_ticks * (1000 / kCalibrationMillis);
+    std::uint32_t periodic_initial_count = measured_frequency_hz / frequency_hz;
+    if (periodic_initial_count == 0) {
+        periodic_initial_count = 1; // degenerate only if frequency_hz is absurdly high
+    }
+
+    // Stop the one-shot countdown before reprogramming for periodic mode.
+    write_msr(kMsrTimerInitialCount, 0);
+    write_msr(kMsrLvtTimer, kLvtTimerPeriodic | vector); // unmasked
+    write_msr(kMsrTimerInitialCount, periodic_initial_count);
+
+    return measured_frequency_hz;
+}
 
 } // namespace lapic

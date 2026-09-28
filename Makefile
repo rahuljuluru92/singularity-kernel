@@ -140,7 +140,7 @@ $(BUILD)/idt.o: kernel/idt.cpp kernel/idt.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD)/isr.o: kernel/isr.cpp kernel/isr.hpp kernel/pic.hpp kernel/sched.hpp include/serial.hpp
+$(BUILD)/isr.o: kernel/isr.cpp kernel/isr.hpp kernel/lapic.hpp kernel/sched.hpp include/serial.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 

@@ -55,11 +55,15 @@ void init() {
     outb(kSlaveData, kIcw4_8086);
     io_wait();
 
-    // Mask everything except IRQ0 (timer) on the master, and everything
-    // on the slave — no other hardware IRQs are handled yet, and leaving
-    // them unmasked with no IDT entry configured for their vectors would
-    // fault exactly like stage 3's vector-32 bug did before it had one.
-    outb(kMasterData, 0xFE);
+    // Mask everything, including IRQ0 — as of stage 10, every core has
+    // its own LAPIC timer driving its own scheduler tick (see
+    // kernel/lapic.cpp), and nothing in this project takes an interrupt
+    // through the legacy 8259 path anymore. This remap+mask-everything
+    // call still runs once, from the BSP, purely to put the PIC into a
+    // known, safe, non-colliding-with-CPU-exceptions state rather than
+    // trusting whatever UEFI happened to leave it in — not because
+    // anything still depends on its IRQs. See DECISIONS.md, stage 10.
+    outb(kMasterData, 0xFF);
     outb(kSlaveData, 0xFF);
 }
 

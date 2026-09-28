@@ -334,9 +334,21 @@ extern "C" void kernel_main(efi::Handle image_handle, efi::SystemTable* system_t
     // other raw-physical-pointer access in this codebase.
     acpi::init(system_table); // prints [OK] acpi madt lapics=... ioapics=...
 
+    // Free-running reference clock the LAPIC timer calibrates itself
+    // against below — must be running before any core (BSP or AP) calls
+    // lapic::calibrate_and_arm_timer. A single shared physical PIT, only
+    // ever started once, from the BSP. See DECISIONS.md, stage 10.
+    pit::start_reference_clock();
+
     lapic::enable();
     serial::puts("[OK] lapic id=");
     serial::put_hex(lapic::id());
+    serial::puts("\r\n");
+
+    constexpr uint8_t kTimerVector = 32;
+    uint32_t measured_hz = lapic::calibrate_and_arm_timer(100, kTimerVector);
+    serial::puts("[OK] lapic timer measured_hz=");
+    serial::put_hex(measured_hz);
     serial::puts("\r\n");
 
     ioapic::init();
@@ -358,8 +370,7 @@ extern "C" void kernel_main(efi::Handle image_handle, efi::SystemTable* system_t
     // interrupts masked, right after printing its own id.
     smp::bring_up_all_aps();
 
-    pic::init();
-    pit::init(100); // 100 Hz — see DECISIONS.md
+    pic::init(); // remap + mask everything; see DECISIONS.md, stage 10
     sched::init();
 
     asm volatile("sti"); // first time this project has ever enabled interrupts

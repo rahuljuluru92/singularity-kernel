@@ -1,5 +1,5 @@
 #include "isr.hpp"
-#include "pic.hpp"
+#include "lapic.hpp"
 #include "sched.hpp"
 #include "serial.hpp"
 
@@ -29,13 +29,15 @@ void expect_fault(uint64_t vector, uint64_t resume_rip) {
 // stack) is later-stage work. An unmatched exception halts. A vector
 // matching a registered isr::expect_fault() resumes on the SAME trap
 // frame instead — see isr.hpp for why that's safe and deliberately
-// narrow. Vector 32 (the only hardware IRQ this project handles, the PIT
-// timer) is different: it always "resumes," just not necessarily on the
-// same trap frame — see sched::on_timer_tick.
+// narrow. Vector 32 (the only hardware IRQ this project handles) is
+// different: it always "resumes," just not necessarily on the same trap
+// frame — see sched::on_timer_tick. As of stage 10 this is every core's
+// own LAPIC timer (not the legacy PIT/PIC — see DECISIONS.md), so it's
+// LAPIC EOI here, not the 8259's.
 extern "C" uint64_t isr_handler(registers* regs) {
     if (regs->vector == kTimerVector) {
         uint64_t next_rsp = sched::on_timer_tick(reinterpret_cast<uint64_t>(regs));
-        pic::send_eoi(0);
+        lapic::eoi();
         return next_rsp;
     }
 
