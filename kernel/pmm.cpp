@@ -1,6 +1,8 @@
 #include "pmm.hpp"
 
+#include "acpi.hpp"
 #include "bitmap_allocator.hpp"
+#include "numa_map.hpp"
 #include "serial.hpp"
 
 #include <new>
@@ -29,6 +31,18 @@ std::uint8_t g_memory_map_buffer[kMemoryMapBufferBytes];
 BitmapAllocator* g_allocator = nullptr;
 alignas(BitmapAllocator) std::uint8_t g_allocator_storage[sizeof(BitmapAllocator)];
 
+// NUMA state, all left at "no topology known" until init_numa() runs
+// (see pmm.hpp — that's a legitimate, non-error state, not just an
+// uninitialized one). Capacity is a generous static bound on distinct
+// NUMA node IDs, same "generous static bound" style as
+// MadtParseResult::kMaxLapics/SratParseResult::kMax* — comfortably
+// beyond anything this project's QEMU `-numa` config will ever use.
+constexpr std::size_t kMaxNumaNodes = 8;
+
+NumaMap g_numa_map;
+std::size_t g_free_pages_by_node[kMaxNumaNodes] = {};
+std::size_t g_numa_node_count = 0;
+
 [[noreturn]] void panic(const char* msg) {
     serial::puts("[PANIC] pmm::init: ");
     serial::puts(msg);
@@ -36,6 +50,21 @@ alignas(BitmapAllocator) std::uint8_t g_allocator_storage[sizeof(BitmapAllocator
     for (;;) {
         asm volatile("cli\n\thlt");
     }
+}
+
+// Adjusts the given node's free-page counter, if it maps to a node this
+// project actually tracks — a no-op for NumaMap::kUnknownNode (a page
+// outside every SRAT-described range) or a node ID beyond kMaxNumaNodes.
+// Neither is an error: init_numa() is never called at all on hardware/
+// QEMU configs with no SRAT, and every alloc_page()/free_page()/etc. call
+// site below must stay correct with no NUMA data present, not treat that
+// as a special case.
+void adjust_node_free_count(std::uint32_t node, int delta) {
+    if (node == NumaMap::kUnknownNode || node >= kMaxNumaNodes) {
+        return;
+    }
+    g_free_pages_by_node[node] = static_cast<std::size_t>(
+        static_cast<std::ptrdiff_t>(g_free_pages_by_node[node]) + delta);
 }
 
 efi::MemoryDescriptor* descriptor_at(std::uint8_t* base, std::size_t index,
@@ -135,15 +164,29 @@ std::uintptr_t alloc_page() {
     if (idx == BitmapAllocator::kInvalidPage) {
         return 0;
     }
+    adjust_node_free_count(g_numa_map.node_of(idx), -1);
     return static_cast<std::uintptr_t>(idx) * kPageSize;
 }
 
 void free_page(std::uintptr_t physical_address) {
-    g_allocator->free(static_cast<std::size_t>(physical_address / kPageSize));
+    std::size_t idx = static_cast<std::size_t>(physical_address / kPageSize);
+    // Read the prior state before freeing: free() (like mark_free) is
+    // idempotent, so a double-free must not double-count the node's
+    // free-page total either.
+    bool was_free = g_allocator->is_free(idx);
+    g_allocator->free(idx);
+    if (!was_free) {
+        adjust_node_free_count(g_numa_map.node_of(idx), 1);
+    }
 }
 
 void reserve_page(std::uintptr_t physical_address) {
-    g_allocator->mark_used(static_cast<std::size_t>(physical_address / kPageSize));
+    std::size_t idx = static_cast<std::size_t>(physical_address / kPageSize);
+    bool was_free = g_allocator->is_free(idx);
+    g_allocator->mark_used(idx);
+    if (was_free) {
+        adjust_node_free_count(g_numa_map.node_of(idx), -1);
+    }
 }
 
 std::uintptr_t alloc_contiguous_pages(std::size_t count) {
@@ -151,10 +194,102 @@ std::uintptr_t alloc_contiguous_pages(std::size_t count) {
     if (idx == BitmapAllocator::kInvalidPage) {
         return 0;
     }
+    // A contiguous run can in principle straddle a node boundary (even
+    // though this project's own `-numa` config never produces one small
+    // enough to matter) — charge each page to whatever node it actually
+    // belongs to, not just the first page's node.
+    for (std::size_t i = 0; i < count; i++) {
+        adjust_node_free_count(g_numa_map.node_of(idx + i), -1);
+    }
     return static_cast<std::uintptr_t>(idx) * kPageSize;
 }
 
 std::size_t total_pages() { return g_allocator->page_count(); }
 std::size_t free_pages() { return g_allocator->free_count(); }
+
+void init_numa() {
+    if (!acpi::srat_present()) {
+        return; // no SRAT — node_count() stays 0, see pmm.hpp
+    }
+
+    const acpi::SratParseResult& srat = acpi::srat();
+    for (int i = 0; i < srat.memory_affinity_count; i++) {
+        const acpi::MemoryAffinityEntry& m = srat.memory_affinities[i];
+        // Skip disabled entries (real QEMU SRATs include an all-zero
+        // placeholder — see DECISIONS.md, stage 11) and any zero-length
+        // range; NumaMap::add_region already drops the latter, but
+        // checking the flag here too means a disabled-but-nonzero-length
+        // entry (spec-legal, just not something this project's QEMU
+        // config produces) is never mistaken for real, allocatable
+        // memory.
+        if ((m.flags & acpi::kMemoryAffinityFlagEnabled) == 0) {
+            continue;
+        }
+        std::size_t start_page = static_cast<std::size_t>(m.base_address / kPageSize);
+        std::size_t page_count_in_region = static_cast<std::size_t>(m.length / kPageSize);
+        g_numa_map.add_region(start_page, page_count_in_region, m.proximity_domain);
+    }
+
+    g_numa_node_count = g_numa_map.node_count();
+    if (g_numa_node_count > kMaxNumaNodes) {
+        g_numa_node_count = kMaxNumaNodes; // see kMaxNumaNodes
+    }
+
+    // SRAT ranges and the EFI memory map's EfiConventionalMemory ranges
+    // (what init()'s Pass 2 actually marked free) are independent
+    // partitions of the address space with no guaranteed alignment
+    // between them — computing each node's free-page count by scanning
+    // what the bitmap now genuinely has marked free, rather than
+    // assuming the two agree, is the only way to get a correct answer.
+    for (int i = 0; i < g_numa_map.region_count(); i++) {
+        const NumaMap::Region& r = g_numa_map.region(i);
+        if (r.node >= kMaxNumaNodes) {
+            continue;
+        }
+        for (std::size_t page = r.start_page; page < r.start_page + r.page_count; page++) {
+            if (g_allocator->is_free(page)) {
+                g_free_pages_by_node[r.node]++;
+            }
+        }
+    }
+
+    serial::puts("[OK] pmm numa nodes=");
+    serial::put_hex(static_cast<std::uint64_t>(g_numa_node_count));
+    serial::puts("\r\n");
+    for (std::size_t node = 0; node < g_numa_node_count; node++) {
+        serial::puts("[OK] pmm numa node=");
+        serial::put_hex(static_cast<std::uint64_t>(node));
+        serial::puts(" free_pages=");
+        serial::put_hex(static_cast<std::uint64_t>(g_free_pages_by_node[node]));
+        serial::puts("\r\n");
+    }
+}
+
+std::size_t node_count() { return g_numa_node_count; }
+
+std::size_t free_pages_on_node(std::size_t node) {
+    if (node >= kMaxNumaNodes) {
+        return 0;
+    }
+    return g_free_pages_by_node[node];
+}
+
+std::uintptr_t alloc_page_on_node(std::size_t node) {
+    if (node >= kMaxNumaNodes) {
+        return 0;
+    }
+    for (int i = 0; i < g_numa_map.region_count(); i++) {
+        const NumaMap::Region& r = g_numa_map.region(i);
+        if (r.node != node) {
+            continue;
+        }
+        std::size_t idx = g_allocator->alloc_in_range(r.start_page, r.page_count);
+        if (idx != BitmapAllocator::kInvalidPage) {
+            adjust_node_free_count(static_cast<std::uint32_t>(node), -1);
+            return static_cast<std::uintptr_t>(idx) * kPageSize;
+        }
+    }
+    return 0;
+}
 
 } // namespace pmm

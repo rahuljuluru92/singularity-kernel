@@ -139,6 +139,50 @@ TEST_CASE("alloc_contiguous fails without corrupting state when no run is long e
     REQUIRE(alloc.free_count() == before); // failed attempt must not partially allocate
 }
 
+TEST_CASE("alloc_in_range only allocates from within the given sub-range", "[bitmap]") {
+    std::uint8_t bitmap[4] = {0};
+    BitmapAllocator alloc(bitmap, 32);
+    alloc.mark_free_range(0, 32);
+
+    std::size_t got = alloc.alloc_in_range(16, 8); // pages [16, 24)
+    REQUIRE(got >= 16);
+    REQUIRE(got < 24);
+    REQUIRE_FALSE(alloc.is_free(got));
+    REQUIRE(alloc.free_count() == 31);
+}
+
+TEST_CASE("alloc_in_range fails without corrupting state when the sub-range is fully used",
+          "[bitmap]") {
+    std::uint8_t bitmap[4] = {0};
+    BitmapAllocator alloc(bitmap, 32);
+    alloc.mark_free_range(0, 32);
+    alloc.mark_used_range(16, 8); // pages [16, 24) all used
+
+    std::size_t before = alloc.free_count();
+    REQUIRE(alloc.alloc_in_range(16, 8) == BitmapAllocator::kInvalidPage);
+    REQUIRE(alloc.free_count() == before);
+}
+
+TEST_CASE("alloc_in_range never returns a page outside the requested sub-range", "[bitmap]") {
+    std::uint8_t bitmap[4] = {0};
+    BitmapAllocator alloc(bitmap, 32);
+    alloc.mark_free_range(0, 32);
+    alloc.mark_used_range(16, 8); // only pages outside [16,24) are free
+
+    std::size_t got = alloc.alloc_in_range(16, 8);
+    REQUIRE(got == BitmapAllocator::kInvalidPage); // must not "spill over" to pages 0-15/24-31
+}
+
+TEST_CASE("alloc_in_range clamps to page_count() instead of reading out of bounds", "[bitmap]") {
+    std::uint8_t bitmap[4] = {0};
+    BitmapAllocator alloc(bitmap, 32);
+    alloc.mark_free_range(0, 32);
+
+    std::size_t got = alloc.alloc_in_range(30, 100); // range runs past page_count()
+    REQUIRE(got >= 30);
+    REQUIRE(got < 32);
+}
+
 TEST_CASE("alloc search wraps around the hint instead of only scanning forward", "[bitmap]") {
     std::uint8_t bitmap[4] = {0};
     BitmapAllocator alloc(bitmap, 32);

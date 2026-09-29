@@ -23,6 +23,11 @@ exec qemu-system-x86_64 \
     -cpu qemu64,+x2apic \
     -smp 4 \
     -m 256M \
+    -object memory-backend-ram,id=ram0,size=128M \
+    -object memory-backend-ram,id=ram1,size=128M \
+    -numa node,nodeid=0,cpus=0-1,memdev=ram0 \
+    -numa node,nodeid=1,cpus=2-3,memdev=ram1 \
+    -numa dist,src=0,dst=1,val=20 \
     -drive if=pflash,format=raw,unit=0,file="$OVMF_CODE",readonly=on \
     -drive if=pflash,format=raw,unit=1,file="$VARS" \
     -drive format=raw,file=fat:rw:build/esp \

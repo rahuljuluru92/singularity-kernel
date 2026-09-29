@@ -41,6 +41,16 @@ class BitmapAllocator {
     // separate calls.
     std::size_t alloc_contiguous(std::size_t count);
 
+    // Returns the index of a newly-allocated page (now marked used) from
+    // within [start_page, start_page + page_count), or kInvalidPage if
+    // none in that sub-range are free. Indices at or past page_count()
+    // are silently excluded from the search, same "ignore, don't crash"
+    // handling as every other out-of-range access here. Doesn't touch or
+    // consult next_search_hint_ — this is a secondary, range-targeted
+    // path (e.g. "allocate on this NUMA node specifically"), not the
+    // general-purpose path alloc() optimizes for.
+    std::size_t alloc_in_range(std::size_t start_page, std::size_t page_count);
+
     // Idempotent, like mark_free — freeing an already-free (or
     // already-double-freed) page is a no-op, not an error. See
     // DECISIONS.md for why: no panic/error-reporting path exists at this

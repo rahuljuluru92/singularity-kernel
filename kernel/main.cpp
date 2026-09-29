@@ -75,6 +75,58 @@ void pmm_torture_test() {
     serial::puts("[OK] pmm torture\r\n");
 }
 
+// NUMA-awareness proof for the physical page allocator: allocates a
+// batch of pages explicitly from each known node via
+// pmm::alloc_page_on_node, confirms none of them duplicate (same
+// no-double-allocation check as pmm_torture_test) and that the node's
+// own free-page count drops by exactly the batch size, then frees them
+// all and confirms that count returns to its original baseline — the
+// same alloc/free/verify-baseline shape as pmm_torture_test, now checked
+// per-node instead of globally. A no-op if no SRAT was found (node_count
+// == 0) — nothing to test on hardware/QEMU configs with no NUMA topology.
+void pmm_numa_test() {
+    std::size_t nodes = pmm::node_count();
+    if (nodes == 0) {
+        return;
+    }
+
+    constexpr int kBatch = 50;
+    for (std::size_t node = 0; node < nodes; node++) {
+        std::size_t baseline = pmm::free_pages_on_node(node);
+        if (baseline < static_cast<std::size_t>(kBatch)) {
+            panic("pmm numa test: node doesn't have enough free pages for the test batch");
+        }
+
+        std::uintptr_t pages[kBatch];
+        for (int i = 0; i < kBatch; i++) {
+            pages[i] = pmm::alloc_page_on_node(node);
+            if (pages[i] == 0) {
+                panic("pmm numa test: alloc_page_on_node failed before its node was exhausted");
+            }
+            for (int j = 0; j < i; j++) {
+                if (pages[j] == pages[i]) {
+                    panic("pmm numa test: alloc_page_on_node returned a duplicate");
+                }
+            }
+        }
+
+        if (pmm::free_pages_on_node(node) != baseline - static_cast<std::size_t>(kBatch)) {
+            panic("pmm numa test: node's free-page count didn't drop by exactly the batch size");
+        }
+
+        for (int i = 0; i < kBatch; i++) {
+            pmm::free_page(pages[i]);
+        }
+        if (pmm::free_pages_on_node(node) != baseline) {
+            panic("pmm numa test: node's free-page count didn't return to baseline after freeing");
+        }
+    }
+
+    serial::puts("[OK] pmm numa test nodes=");
+    serial::put_hex(static_cast<uint64_t>(nodes));
+    serial::puts("\r\n");
+}
+
 // Deliberate divide-by-zero (stage 2's original self-test, now using
 // isr::expect_fault so it can resume instead of halting — stage 3 has
 // more to do afterward). volatile forces a real runtime idiv; without it
@@ -444,6 +496,13 @@ extern "C" void kernel_main(efi::Handle image_handle, efi::SystemTable* system_t
     // identity map now covers — safe to walk from here on, same as any
     // other raw-physical-pointer access in this codebase.
     acpi::init(system_table); // prints [OK] acpi madt lapics=... ioapics=...
+
+    // Classifies the pmm's already-built bitmap by NUMA node, using the
+    // SRAT acpi::init() just parsed (if any) — must run after acpi::init,
+    // unlike pmm::init itself. A no-op, printing nothing, if no SRAT was
+    // found. See DECISIONS.md, stage 11.
+    pmm::init_numa(); // prints [OK] pmm numa nodes=... / [OK] pmm numa node=...
+    pmm_numa_test();
 
     // Free-running reference clock the LAPIC timer calibrates itself
     // against below — must be running before any core (BSP or AP) calls

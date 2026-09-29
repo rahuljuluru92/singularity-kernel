@@ -74,6 +74,20 @@ std::size_t BitmapAllocator::alloc() {
 
 void BitmapAllocator::free(std::size_t page_index) { mark_free(page_index); }
 
+std::size_t BitmapAllocator::alloc_in_range(std::size_t start_page, std::size_t page_count) {
+    std::size_t end = start_page + page_count;
+    if (end > page_count_) {
+        end = page_count_;
+    }
+    for (std::size_t idx = start_page; idx < end; idx++) {
+        if (is_free(idx)) {
+            mark_used(idx);
+            return idx;
+        }
+    }
+    return kInvalidPage;
+}
+
 std::size_t BitmapAllocator::alloc_contiguous(std::size_t count) {
     if (count == 0 || count > free_count_) {
         return kInvalidPage;

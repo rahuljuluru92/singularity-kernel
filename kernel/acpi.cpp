@@ -79,7 +79,28 @@ const Rsdp* find_rsdp(efi::SystemTable* system_table) {
     return nullptr;
 }
 
+// Finds a table by its 4-byte signature among the XSDT's entries.
+// Returns nullptr if no entry matches — callers decide whether that's a
+// panic (MADT, always required) or a legitimate absence (SRAT, only
+// present when NUMA topology exists).
+const SdtHeader* find_table(const SdtHeader* xsdt, const char* signature) {
+    const auto* entries =
+        reinterpret_cast<const std::uint64_t*>(reinterpret_cast<const std::uint8_t*>(xsdt) +
+                                                 sizeof(SdtHeader));
+    std::size_t entry_count = (xsdt->length - sizeof(SdtHeader)) / sizeof(std::uint64_t);
+
+    for (std::size_t i = 0; i < entry_count; i++) {
+        const auto* candidate = reinterpret_cast<const SdtHeader*>(entries[i]);
+        if (signature_matches(candidate->signature, signature, 4)) {
+            return candidate;
+        }
+    }
+    return nullptr;
+}
+
 MadtParseResult g_madt_result;
+SratParseResult g_srat_result;
+bool g_srat_present = false;
 
 } // namespace
 
@@ -116,19 +137,7 @@ void init(efi::SystemTable* system_table) {
         panic("XSDT checksum mismatch");
     }
 
-    const auto* entries =
-        reinterpret_cast<const std::uint64_t*>(reinterpret_cast<const std::uint8_t*>(xsdt) +
-                                                 sizeof(SdtHeader));
-    std::size_t entry_count = (xsdt->length - sizeof(SdtHeader)) / sizeof(std::uint64_t);
-
-    const SdtHeader* madt = nullptr;
-    for (std::size_t i = 0; i < entry_count; i++) {
-        const auto* candidate = reinterpret_cast<const SdtHeader*>(entries[i]);
-        if (signature_matches(candidate->signature, "APIC", 4)) {
-            madt = candidate;
-            break;
-        }
-    }
+    const SdtHeader* madt = find_table(xsdt, "APIC");
     if (madt == nullptr) {
         panic("MADT (APIC table) not found in XSDT");
     }
@@ -148,8 +157,38 @@ void init(efi::SystemTable* system_table) {
     serial::puts(" ioapics=");
     serial::put_hex(static_cast<std::uint64_t>(g_madt_result.ioapic_count));
     serial::puts("\r\n");
+
+    // SRAT is optional, unlike the MADT — see acpi.hpp. No `-numa` flags
+    // (or older/non-QEMU firmware) legitimately means no SRAT at all, and
+    // that absence alone isn't panic-worthy. But if a SRAT *is* present,
+    // it gets the same "verify, don't just trust" treatment as every
+    // other ACPI table here — a corrupt SRAT is a real problem worth a
+    // loud panic, not a silent skip.
+    const SdtHeader* srat = find_table(xsdt, "SRAT");
+    if (srat != nullptr) {
+        if (!checksum_ok(srat, srat->length)) {
+            panic("SRAT checksum mismatch");
+        }
+        // Fixed SRAT header: SdtHeader (36 bytes) + reserved u32 (4) +
+        // reserved u64 (8) = 48 bytes, then the variable-length entry list.
+        constexpr std::size_t kSratFixedHeaderSize = sizeof(SdtHeader) + 4 + 8;
+        const auto* srat_bytes = reinterpret_cast<const std::uint8_t*>(srat);
+        parse_srat_entries(srat_bytes + kSratFixedHeaderSize, srat->length - kSratFixedHeaderSize,
+                            g_srat_result);
+        g_srat_present = true;
+
+        serial::puts("[OK] acpi srat processor_affinities=");
+        serial::put_hex(static_cast<std::uint64_t>(g_srat_result.processor_affinity_count));
+        serial::puts(" memory_affinities=");
+        serial::put_hex(static_cast<std::uint64_t>(g_srat_result.memory_affinity_count));
+        serial::puts("\r\n");
+    }
 }
 
 const MadtParseResult& madt() { return g_madt_result; }
+
+bool srat_present() { return g_srat_present; }
+
+const SratParseResult& srat() { return g_srat_result; }
 
 } // namespace acpi
