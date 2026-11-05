@@ -65,4 +65,25 @@ std::size_t free_pages_on_node(std::size_t node);
 // policy (e.g. "any node" via plain alloc_page(), or panic).
 std::uintptr_t alloc_page_on_node(std::size_t node);
 
+// Sentinel meaning "no NUMA data for this" — either init_numa() found no
+// SRAT at all (nothing is NUMA-classified), or, for node_for_cpu
+// specifically, the given APIC ID has no matching Processor Affinity
+// entry in the SRAT. Distinct from every real node ID, which is always
+// < node_count().
+constexpr std::size_t kUnknownNode = static_cast<std::size_t>(-1);
+
+// Looks up which NUMA node the given LAPIC/x2APIC ID belongs to, from the
+// SRAT's Processor Affinity entries — kUnknownNode if no SRAT was found,
+// or the ID has no enabled matching entry. Valid only after init_numa();
+// callers use this to find "the node local to the core creating a
+// resource" before calling alloc_page_on_node/
+// alloc_contiguous_pages_on_node with it.
+std::size_t node_for_cpu(std::uint32_t apic_id);
+
+// Same contract as alloc_contiguous_pages, but restricted to the given
+// NUMA node's own memory ranges — 0 if that node has no contiguous run of
+// `count` free pages right now. Like alloc_page_on_node, this never falls
+// back to a different node.
+std::uintptr_t alloc_contiguous_pages_on_node(std::size_t node, std::size_t count);
+
 } // namespace pmm

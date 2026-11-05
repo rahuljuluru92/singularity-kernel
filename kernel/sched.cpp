@@ -1,8 +1,10 @@
 #include "sched.hpp"
 
-#include "heap.hpp"
+#include "bitmap_allocator.hpp" // for pmm::kPageSize
 #include "isr.hpp"
 #include "lapic.hpp"
+#include "paging.hpp"
+#include "pmm.hpp"
 #include "serial.hpp"
 
 #include <cstddef>
@@ -13,7 +15,8 @@ namespace {
 
 constexpr int kMaxTasks = 64;
 constexpr int kMaxCores = 64; // matches acpi::MadtParseResult::kMaxLapics
-constexpr size_t kStackSize = 16384;
+constexpr size_t kStackSize = kTaskStackBytes;
+constexpr size_t kStackPages = kStackSize / pmm::kPageSize;
 constexpr uint16_t kKernelCodeSelector = 0x08;
 constexpr uint16_t kKernelDataSelector = 0x10;
 constexpr uint64_t kInterruptsEnabledFlag = 0x202; // reserved bit 1 + IF
@@ -149,6 +152,48 @@ void sanity_check_or_panic(int idx, uint32_t claiming_core, uint64_t rsp) {
     }
 }
 
+// Allocates a task stack directly from pmm — kStackPages physically
+// contiguous pages, preferring the NUMA node local to `owner_core` (the
+// core about to own this task), falling back to any node if that node
+// currently has no run that long free, or if no NUMA topology is known
+// at all (pmm::kUnknownNode — a legitimate result on hardware/QEMU
+// configs with no SRAT). Every tracked physical page is already mapped
+// RW/NX at both its identity and higher-half alias by paging::init(), so
+// no additional mapping work is needed here — the higher-half alias is
+// used purely for consistency with how the rest of this kernel's
+// dynamically-managed memory (the heap) exposes pointers, not because the
+// identity alias would be any less valid. Returns nullptr if no node
+// (preferred or otherwise) currently has kStackPages contiguous free
+// pages. See DECISIONS.md, stage 11.
+uint8_t* alloc_stack(uint32_t owner_core) {
+    std::size_t node = pmm::node_for_cpu(owner_core);
+    std::uintptr_t phys = 0;
+    if (node != pmm::kUnknownNode) {
+        phys = pmm::alloc_contiguous_pages_on_node(node, kStackPages);
+    }
+    if (phys == 0) {
+        phys = pmm::alloc_contiguous_pages(kStackPages);
+    }
+    if (phys == 0) {
+        return nullptr;
+    }
+    return reinterpret_cast<uint8_t*>(paging::to_higher_half(phys));
+}
+
+// Inverse of alloc_stack: returns exactly the kStackPages physical pages
+// backing `stack` to pmm. `stack` must be a pointer alloc_stack itself
+// returned (its higher-half alias), never a foreign pointer — there's no
+// magic-number/corruption check here the way heap::kfree has, since
+// these pages carry no header of their own; `stack`'s validity is the
+// scheduler's own bookkeeping responsibility (Task::stack), not
+// something this function can verify.
+void free_stack(uint8_t* stack) {
+    std::uintptr_t phys = paging::to_physical(reinterpret_cast<uintptr_t>(stack));
+    for (std::size_t i = 0; i < kStackPages; i++) {
+        pmm::free_page(phys + i * pmm::kPageSize);
+    }
+}
+
 // The single source of "what should this core run next" — round-robin
 // among tasks it already owns, then (if stealing is enabled) anyone
 // else's ready work, then its own idle context. Must be called with
@@ -234,7 +279,7 @@ int reap_finished_tasks() {
     int freed = 0;
     for (int i = 0; i < g_task_count; i++) {
         if (g_tasks[i].state == kFinished && g_tasks[i].stack != nullptr) {
-            heap::kfree(g_tasks[i].stack);
+            free_stack(g_tasks[i].stack);
             g_tasks[i].stack = nullptr;
             g_tasks[i].state = kFree;
             freed++;
@@ -268,11 +313,12 @@ int create_task(void (*entry)(), const char* name) {
     if (g_tasks[id].state == kFinished && g_tasks[id].stack != nullptr) {
         // Reusing a finished task's slot: safe here specifically because
         // a finished task is never resumed or touched by anyone again.
-        heap::kfree(g_tasks[id].stack);
+        free_stack(g_tasks[id].stack);
         g_tasks[id].stack = nullptr;
     }
 
-    auto* stack = static_cast<uint8_t*>(heap::kmalloc(kStackSize));
+    uint32_t owner_core = static_cast<uint32_t>(lapic::id());
+    uint8_t* stack = alloc_stack(owner_core);
     if (stack == nullptr) {
         // Graceful degradation, not an immediate panic: reclaim whatever
         // finished tasks project-wide haven't been cleaned up yet
@@ -282,15 +328,15 @@ int create_task(void (*entry)(), const char* name) {
         // it isn't, so inline the sweep here directly instead).
         for (int i = 0; i < g_task_count; i++) {
             if (g_tasks[i].state == kFinished && g_tasks[i].stack != nullptr) {
-                heap::kfree(g_tasks[i].stack);
+                free_stack(g_tasks[i].stack);
                 g_tasks[i].stack = nullptr;
                 g_tasks[i].state = kFree;
             }
         }
-        stack = static_cast<uint8_t*>(heap::kmalloc(kStackSize));
+        stack = alloc_stack(owner_core);
     }
     if (stack == nullptr) {
-        panic("create_task: kmalloc failed even after reaping finished tasks");
+        panic("create_task: pmm out of contiguous pages even after reaping finished tasks");
     }
 
     uintptr_t top = reinterpret_cast<uintptr_t>(stack + kStackSize) & ~0xFULL;
@@ -310,7 +356,7 @@ int create_task(void (*entry)(), const char* name) {
         .rsp = reinterpret_cast<uint64_t>(regs),
         .stack = stack,
         .name = name,
-        .owner_core = static_cast<int32_t>(lapic::id()),
+        .owner_core = static_cast<int32_t>(owner_core),
         .state = kReady,
     };
 

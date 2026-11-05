@@ -183,6 +183,63 @@ TEST_CASE("alloc_in_range clamps to page_count() instead of reading out of bound
     REQUIRE(got < 32);
 }
 
+TEST_CASE("alloc_contiguous_in_range returns a run only within the given sub-range", "[bitmap]") {
+    std::uint8_t bitmap[8] = {0};
+    BitmapAllocator alloc(bitmap, 64);
+    alloc.mark_free_range(0, 64);
+
+    std::size_t start = alloc.alloc_contiguous_in_range(32, 16, 5); // pages [32, 48)
+    REQUIRE(start != BitmapAllocator::kInvalidPage);
+    REQUIRE(start >= 32);
+    REQUIRE(start + 5 <= 48);
+    for (std::size_t i = 0; i < 5; i++) {
+        REQUIRE_FALSE(alloc.is_free(start + i));
+    }
+    REQUIRE(alloc.free_count() == 59);
+}
+
+TEST_CASE("alloc_contiguous_in_range never returns a run outside the requested sub-range",
+          "[bitmap]") {
+    std::uint8_t bitmap[8] = {0};
+    BitmapAllocator alloc(bitmap, 64);
+    alloc.mark_free_range(0, 64);
+    alloc.mark_used(35); // breaks the only run in [32,48) long enough to start at 32
+
+    std::size_t start = alloc.alloc_contiguous_in_range(32, 16, 5);
+    REQUIRE(start != BitmapAllocator::kInvalidPage);
+    REQUIRE(start >= 32);
+    REQUIRE(start + 5 <= 48); // must not spill into page 48 or beyond
+}
+
+TEST_CASE("alloc_contiguous_in_range fails without corrupting state when no run that long "
+          "exists in the sub-range",
+          "[bitmap]") {
+    std::uint8_t bitmap[8] = {0};
+    BitmapAllocator alloc(bitmap, 64);
+    alloc.mark_free_range(0, 64);
+    // Free only alternating pages within [32,48) -- no run of 2 exists there,
+    // even though plenty of contiguous room exists elsewhere in the bitmap.
+    alloc.mark_used_range(32, 16);
+    for (std::size_t i = 32; i < 48; i += 2) {
+        alloc.mark_free(i);
+    }
+    std::size_t before = alloc.free_count();
+
+    REQUIRE(alloc.alloc_contiguous_in_range(32, 16, 2) == BitmapAllocator::kInvalidPage);
+    REQUIRE(alloc.free_count() == before);
+}
+
+TEST_CASE("alloc_contiguous_in_range clamps to page_count() instead of reading out of bounds",
+          "[bitmap]") {
+    std::uint8_t bitmap[8] = {0};
+    BitmapAllocator alloc(bitmap, 64);
+    alloc.mark_free_range(0, 64);
+
+    std::size_t start = alloc.alloc_contiguous_in_range(60, 100, 3); // region runs past page_count()
+    REQUIRE(start != BitmapAllocator::kInvalidPage);
+    REQUIRE(start + 3 <= 64);
+}
+
 TEST_CASE("alloc search wraps around the hint instead of only scanning forward", "[bitmap]") {
     std::uint8_t bitmap[4] = {0};
     BitmapAllocator alloc(bitmap, 32);

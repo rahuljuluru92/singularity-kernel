@@ -88,6 +88,37 @@ std::size_t BitmapAllocator::alloc_in_range(std::size_t start_page, std::size_t 
     return kInvalidPage;
 }
 
+std::size_t BitmapAllocator::alloc_contiguous_in_range(std::size_t start_page,
+                                                        std::size_t region_page_count,
+                                                        std::size_t count) {
+    if (count == 0) {
+        return kInvalidPage;
+    }
+    std::size_t end = start_page + region_page_count;
+    if (end > page_count_) {
+        end = page_count_;
+    }
+    if (start_page >= end || count > end - start_page) {
+        return kInvalidPage;
+    }
+    for (std::size_t start = start_page; start + count <= end; start++) {
+        bool all_free = true;
+        for (std::size_t i = 0; i < count; i++) {
+            if (!is_free(start + i)) {
+                all_free = false;
+                break;
+            }
+        }
+        if (all_free) {
+            for (std::size_t i = 0; i < count; i++) {
+                mark_used(start + i);
+            }
+            return start;
+        }
+    }
+    return kInvalidPage;
+}
+
 std::size_t BitmapAllocator::alloc_contiguous(std::size_t count) {
     if (count == 0 || count > free_count_) {
         return kInvalidPage;

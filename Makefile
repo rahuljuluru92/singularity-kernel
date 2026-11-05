@@ -58,7 +58,7 @@ $(BUILD)/boot.o: boot/boot.cpp include/serial.hpp kernel/efi.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD)/main.o: kernel/main.cpp kernel/acpi.hpp kernel/lapic.hpp kernel/ioapic.hpp kernel/smp.hpp kernel/gdt.hpp kernel/idt.hpp kernel/isr.hpp kernel/pmm.hpp kernel/paging.hpp kernel/heap.hpp kernel/pic.hpp kernel/pit.hpp kernel/sched.hpp kernel/virtio_blk.hpp kernel/fat32.hpp kernel/shell.hpp include/serial.hpp
+$(BUILD)/main.o: kernel/main.cpp kernel/acpi.hpp kernel/lapic.hpp kernel/ioapic.hpp kernel/smp.hpp kernel/gdt.hpp kernel/idt.hpp kernel/isr.hpp kernel/pmm.hpp pmm/bitmap_allocator.hpp kernel/paging.hpp kernel/heap.hpp kernel/pic.hpp kernel/pit.hpp kernel/sched.hpp kernel/virtio_blk.hpp kernel/fat32.hpp kernel/shell.hpp include/serial.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
@@ -82,7 +82,7 @@ $(BUILD)/pit.o: kernel/pit.cpp kernel/pit.hpp include/serial.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD)/sched.o: kernel/sched.cpp kernel/sched.hpp kernel/heap.hpp kernel/isr.hpp kernel/lapic.hpp include/serial.hpp
+$(BUILD)/sched.o: kernel/sched.cpp kernel/sched.hpp kernel/isr.hpp kernel/lapic.hpp kernel/paging.hpp kernel/pmm.hpp pmm/bitmap_allocator.hpp include/serial.hpp
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
