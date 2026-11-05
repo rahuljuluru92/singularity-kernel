@@ -292,4 +292,37 @@ std::uintptr_t alloc_page_on_node(std::size_t node) {
     return 0;
 }
 
+std::size_t node_for_cpu(std::uint32_t apic_id) {
+    if (!acpi::srat_present()) {
+        return kUnknownNode;
+    }
+    const acpi::SratParseResult& srat = acpi::srat();
+    for (int i = 0; i < srat.processor_affinity_count; i++) {
+        const acpi::ProcessorAffinityEntry& p = srat.processor_affinities[i];
+        if (p.apic_id != apic_id || (p.flags & acpi::kProcessorAffinityFlagEnabled) == 0) {
+            continue;
+        }
+        return p.proximity_domain < kMaxNumaNodes ? p.proximity_domain : kUnknownNode;
+    }
+    return kUnknownNode;
+}
+
+std::uintptr_t alloc_contiguous_pages_on_node(std::size_t node, std::size_t count) {
+    if (node >= kMaxNumaNodes) {
+        return 0;
+    }
+    for (int i = 0; i < g_numa_map.region_count(); i++) {
+        const NumaMap::Region& r = g_numa_map.region(i);
+        if (r.node != node) {
+            continue;
+        }
+        std::size_t idx = g_allocator->alloc_contiguous_in_range(r.start_page, r.page_count, count);
+        if (idx != BitmapAllocator::kInvalidPage) {
+            adjust_node_free_count(static_cast<std::uint32_t>(node), -static_cast<int>(count));
+            return static_cast<std::uintptr_t>(idx) * kPageSize;
+        }
+    }
+    return 0;
+}
+
 } // namespace pmm

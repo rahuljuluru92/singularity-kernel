@@ -51,6 +51,15 @@ class BitmapAllocator {
     // general-purpose path alloc() optimizes for.
     std::size_t alloc_in_range(std::size_t start_page, std::size_t page_count);
 
+    // Returns the index of the first page of a run of `count` newly-
+    // allocated, physically contiguous pages, searched only within
+    // [start_page, start_page + region_page_count) — kInvalidPage if no
+    // such run exists there. Same relationship to alloc_contiguous() that
+    // alloc_in_range() has to alloc(): a secondary, range-targeted path
+    // (e.g. "count contiguous pages on this NUMA node specifically").
+    std::size_t alloc_contiguous_in_range(std::size_t start_page, std::size_t region_page_count,
+                                           std::size_t count);
+
     // Idempotent, like mark_free — freeing an already-free (or
     // already-double-freed) page is a no-op, not an error. See
     // DECISIONS.md for why: no panic/error-reporting path exists at this

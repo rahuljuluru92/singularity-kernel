@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 // Per-core preemptive dispatcher with work-stealing — replaces stage 5's
@@ -8,6 +9,14 @@
 // stage 10, for the full design and why it replaces Phase 1's scheduler.
 namespace sched {
 
+// Every task's stack, exactly this many bytes — fixed-size, not grown on
+// demand. Exposed (not just a sched.cpp-local constant) so callers that
+// need to reason about a task stack's real physical footprint (e.g.
+// kernel/main.cpp's oom_reaper_test, which verifies pmm's per-node
+// free-page count drops/recovers by exactly this many pages' worth) don't
+// have to duplicate the number.
+constexpr std::size_t kTaskStackBytes = 16384;
+
 // Registers the calling core's own current execution context as its
 // permanent "idle" fallback — what that core resumes when it owns no
 // ready task and stealing finds nothing either. Must be called once per
@@ -15,16 +24,23 @@ namespace sched {
 // LAPIC timer can safely deliver its first tick.
 void register_this_core_idle();
 
-// Creates a new task running entry() on its own 16 KiB heap-allocated
-// stack, initially owned by the CALLING core's run queue. Must only ever
-// be called from the BSP — task creation is not made safe for concurrent
-// calls from multiple cores (it calls heap::kmalloc/kfree, which aren't
-// either — see DECISIONS.md). Returns the task's id.
+// Creates a new task running entry() on its own kTaskStackBytes stack —
+// kTaskStackBytes/pmm::kPageSize physically contiguous pages allocated
+// directly from pmm, preferring the NUMA node local to the CALLING core
+// (falling back to any node if the local one has no run that long free,
+// or if no NUMA topology is known at all — see DECISIONS.md, stage 11).
+// The task is initially owned by the CALLING core's run queue, so this
+// preference also means "the stack is local to the core that will
+// actually run it first." Must only ever be called from the BSP — task
+// creation is not made safe for concurrent calls from multiple cores (it
+// calls pmm::alloc_contiguous_pages[_on_node], which aren't either — see
+// DECISIONS.md). Returns the task's id.
 //
-// If heap::kmalloc fails for the new stack, this makes one attempt at
-// graceful degradation before giving up: reap_finished_tasks() frees any
-// finished-but-not-yet-reclaimed tasks' stacks project-wide, and the
-// allocation is retried once. Only panics if it still fails after that.
+// If no allocation attempt succeeds for the new stack, this makes one
+// attempt at graceful degradation before giving up:
+// reap_finished_tasks() frees any finished-but-not-yet-reclaimed tasks'
+// stacks project-wide, and the allocation is retried once. Only panics
+// if it still fails after that.
 int create_task(void (*entry)(), const char* name);
 
 // Frees the stack of every task slot that has finished but hasn't been

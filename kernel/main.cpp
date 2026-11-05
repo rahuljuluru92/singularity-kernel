@@ -1,4 +1,5 @@
 #include "acpi.hpp"
+#include "bitmap_allocator.hpp" // for pmm::kPageSize
 #include "efi.hpp"
 #include "ioapic.hpp"
 #include "lapic.hpp"
@@ -337,16 +338,32 @@ void smp_scheduler_demo() {
     serial::puts("[OK] smp scheduler demo\r\n");
 }
 
-// Directly exhausts the heap (bypassing the task abstraction, for full
-// control), confirms kmalloc genuinely fails, then proves
-// sched::reap_finished_tasks() is what turns that failure into success:
-// a batch of short-lived tasks is created and run to completion first
-// (their stacks deliberately left unreclaimed — nothing has called
-// create_task again to trigger the ordinary per-slot reuse path), then a
-// single large allocation is sized (from a live heap::free_bytes()
-// reading, not a hardcoded guess) to require reclaiming that leftover
-// space. Confirms the exact same allocation fails before reaping and
-// succeeds after, using the real numbers rather than an assumption.
+// Proves sched::reap_finished_tasks() actually reclaims what it claims
+// to: a batch of short-lived tasks is created and run to completion
+// first (their stacks deliberately left unreclaimed — nothing has called
+// create_task again to trigger the ordinary per-slot reuse path), then
+// pmm's free-page count (per-node, since stage 11 — see DECISIONS.md) is
+// checked before and after both the batch finishing and the reap itself,
+// confirming each step moves it by EXACTLY the expected number of pages,
+// not just "some amount" or "eventually recovers."
+//
+// This replaced an earlier version that exhausted the general kmalloc
+// heap instead: stage 11 moved task stacks off the heap entirely (they
+// now come straight from pmm, so they can be NUMA-placed — see
+// sched.cpp's alloc_stack), so unreclaimed stacks no longer hold heap
+// bytes hostage at all, and testing via heap::free_bytes() would no
+// longer prove anything real. An "oversized allocation fails, then
+// succeeds after reaping" version doesn't translate cleanly either: that
+// only worked against the heap because its initial arena was a
+// deliberately small, fully-known 4 MiB — pmm's real per-node pool is
+// >100 MiB, so 20 tasks' worth of stacks (a few hundred KiB) never comes
+// close to exhausting it, and sizing a request to reliably exceed
+// whatever's currently free would risk requiring a single contiguous
+// run spanning most of a node — no such guarantee exists (or is needed)
+// for a page-granular allocator the way it does for a coalescing
+// freelist. Exact before/after page-count deltas prove the same
+// underlying fact (the reaper reclaims real, live pages) more precisely,
+// without needing to provoke actual exhaustion.
 void oom_reaper_test() {
     // Clear out anything already finished-but-unreclaimed from earlier
     // in the boot sequence (smp_scheduler_demo's 40 tasks, in
@@ -355,6 +372,20 @@ void oom_reaper_test() {
     sched::reap_finished_tasks();
 
     constexpr int kGarbageTasks = 20;
+    constexpr std::size_t kStackPages = sched::kTaskStackBytes / pmm::kPageSize;
+    constexpr std::size_t kHeldPages = static_cast<std::size_t>(kGarbageTasks) * kStackPages;
+
+    // Every garbage task below is created by the BSP (interrupts held
+    // off for the whole batch, same as smp_scheduler_demo), so every one
+    // of its stacks lands on the BSP's own local node specifically (or,
+    // with no NUMA topology known, node tracking is skipped and the
+    // global count is used instead — see pmm::node_for_cpu).
+    std::size_t node = pmm::node_for_cpu(static_cast<uint32_t>(lapic::id()));
+    bool numa = node != pmm::kUnknownNode;
+    auto free_now = [&]() { return numa ? pmm::free_pages_on_node(node) : pmm::free_pages(); };
+
+    std::size_t free_before_tasks = free_now();
+
     int start = sched::tasks_finished();
     // See smp_scheduler_demo's identical comment: the whole batch must
     // be created with the BSP's own interrupts held off, not just each
@@ -367,16 +398,14 @@ void oom_reaper_test() {
     while (sched::tasks_finished() < start + kGarbageTasks) {
         asm volatile("hlt");
     }
-    // Every one of those kGarbageTasks slots is now kFinished, holding a
-    // 16 KiB stack apiece, entirely unreclaimed — nothing has called
-    // create_task since, so the ordinary per-call reuse path never ran.
+    // Every one of those kGarbageTasks slots is now kFinished, holding
+    // kStackPages contiguous physical pages apiece, entirely unreclaimed
+    // — nothing has called create_task since, so the ordinary per-call
+    // reuse path never ran.
 
-    std::size_t free_before = heap::free_bytes();
-    std::size_t oversized_request = free_before + 32768; // more than is currently free, on purpose
-
-    void* should_fail = heap::kmalloc(oversized_request);
-    if (should_fail != nullptr) {
-        panic("oom reaper test: allocation unexpectedly succeeded before reaping");
+    std::size_t free_after_tasks = free_now();
+    if (free_before_tasks - free_after_tasks != kHeldPages) {
+        panic("oom reaper test: finished tasks aren't holding the expected page count");
     }
 
     int reaped = sched::reap_finished_tasks();
@@ -384,11 +413,10 @@ void oom_reaper_test() {
         panic("oom reaper test: reaped count didn't match the garbage batch exactly");
     }
 
-    void* should_succeed = heap::kmalloc(oversized_request);
-    if (should_succeed == nullptr) {
-        panic("oom reaper test: the same allocation still failed after reaping");
+    std::size_t free_after_reap = free_now();
+    if (free_after_reap - free_after_tasks != kHeldPages) {
+        panic("oom reaper test: reaping didn't recover exactly the expected page count");
     }
-    heap::kfree(should_succeed);
 
     serial::puts("[OK] oom reaper reaped=");
     serial::put_hex(static_cast<uint64_t>(reaped));
